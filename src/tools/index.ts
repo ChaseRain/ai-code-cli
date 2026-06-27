@@ -1,0 +1,32 @@
+// src/tools/index.ts
+// tools 模块对外出口：注册表 + 7 个原子工具 + 一个预装默认注册表的工厂。
+
+import { ToolRegistry } from './registry.js';
+import { listDir } from './list-dir.js';
+import { readFile } from './read-file.js';
+import { glob } from './glob.js';
+import { grep } from './grep.js';
+import { writeFile } from './write-file.js';
+import { editFile } from './edit-file.js';
+import { runShell } from './run-shell.js';
+import type { Tool } from '../core/types.js';
+
+export { ToolRegistry } from './registry.js';
+export { PathEscapeError, resolveInRoot } from './path-guard.js';
+export { listDir, readFile, glob, grep, writeFile, editFile, runShell };
+
+/** 首期 7 个原子工具（4 只读 + 3 敏感），注册顺序固定。 */
+export const builtinTools: Tool[] = [
+  listDir,
+  readFile,
+  glob,
+  grep,
+  writeFile,
+  editFile,
+  runShell,
+];
+
+/** 创建一个预装全部内置工具的注册表（cli 装配时调用）。 */
+export function createDefaultRegistry(): ToolRegistry {
+  return new ToolRegistry(builtinTools);
+}

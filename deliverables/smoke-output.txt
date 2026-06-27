@@ -1,0 +1,24 @@
+=== ai-code-cli 真实 API 冒烟 ===
+时间: 2026-06-27T04:20:10.631Z
+模型: deepseek/deepseek-v4-pro
+baseURL: https://ai-kas.kso.net/codeplan/anthropic
+API Key: 已配置（脱敏：***）
+任务: 读取并总结 package.json
+
+[phase] thinking (turn 1/25)
+[tool_call] read_file args={"path":"package.json"}
+[phase] calling-tool (turn 1/25)
+[phase] calling-tool (turn 1/25)
+[tool_result] read_file ok=true (730 chars)
+[phase] thinking (turn 2/25)
+
+[assistant]
+**总结：**
+
+这个项目叫 **ai-code-cli**（v0.1.0），是一个基于 **Anthropic Messages 协议**的最小可用的 TUI（终端用户界面）编码 Agent。它使用 **Ink**（React 用于终端渲染）+ **React 18** 构建交互式终端界面，并配合 **ink-text-input** 处理用户输入。开发用 `tsx` 直接运行 TypeScript 源文件（`dev`），构建用 `tsc` 编译到 `dist/`（`build`），测试用 **Vitest**（`test`）。关键依赖还包括 **Zod**（数据验证）、**fast-glob**（文件匹配）和 **dotenv**（环境变量管理），整体是一个纯 ESM 项目（`"type": "module"`）。
+
+[phase] idle (turn 2/25)
+
+[end] reason=final
+
+会话日志: /Users/linlixin/ai-code-cli/.ai_history/logs/2026-06-27T04-20-10-629Z-tpfvb00o.jsonl

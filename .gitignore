@@ -1,0 +1,10 @@
+# deps & build
+node_modules/
+dist/
+# secrets — 绝不入库
+.env
+.env.*
+!.env.example
+# logs/runtime (note: .ai_history/logs 需提交，不在此忽略)
+*.log
+.DS_Store
