@@ -38,4 +38,18 @@ describe('parseInput —— 内置命令解析', () => {
   it('未知命令返回 unknown 并带命令名', () => {
     expect(parseInput('/foobar x y')).toEqual({ kind: 'unknown', name: 'foobar' });
   });
+
+  // R2：记忆增强命令解析
+  it('/resume 无参恢复最近会话；带参指定文件', () => {
+    expect(parseInput('/resume')).toEqual({ kind: 'resume', file: undefined });
+    expect(parseInput('/resume /tmp/a.jsonl')).toEqual({
+      kind: 'resume',
+      file: '/tmp/a.jsonl',
+    });
+  });
+
+  it('/memory 查看记忆状态', () => {
+    expect(parseInput('/memory')).toEqual({ kind: 'memory' });
+    expect(parseInput('/MEMORY')).toEqual({ kind: 'memory' });
+  });
 });

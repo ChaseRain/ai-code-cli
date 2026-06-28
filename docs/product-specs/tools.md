@@ -1,6 +1,6 @@
 # Spec: 工具系统
 
-> 状态：draft · 最后更新：2026-06-27 · 模块：`src/tools/`
+> 状态：implemented · 最后更新：2026-06-27 · 模块：`src/tools/`（tests/tools.test.ts 覆盖）
 
 ## 职责
 以结构化方式向模型暴露原子能力，统一输入/输出/错误；注册表负责把工具 schema 序列化给 Provider。

@@ -306,10 +306,11 @@ export async function runAgent(
           });
           result = denialResult(); // { ok:false, error:'user denied permission' }
         } else {
+          // 区分放行来源：只读=自动放行(auto_allow)，非用户授权；敏感=用户授权(allow)。
           session.logPermission({
             toolCallId: tc.id,
             tool: tc.name,
-            effect: 'allow',
+            effect: tool.readOnly ? 'auto_allow' : 'allow',
           });
           onEvent({ type: 'phase', phase: 'calling-tool', turn, maxTurns });
           // tools.execute 已把工具自身异常收敛为 ok:false，不会抛出。

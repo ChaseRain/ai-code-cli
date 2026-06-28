@@ -1,6 +1,6 @@
 # Spec: 配置
 
-> 状态：draft · 最后更新：2026-06-27 · 模块：`src/config/`
+> 状态：implemented · 最后更新：2026-06-27 · 模块：`src/config/`（tests/config.test.ts 覆盖）
 
 ## 职责
 加载、合并、校验配置，并保护密钥。

@@ -10,6 +10,8 @@ export type ParsedInput =
   | { kind: 'status' }
   | { kind: 'exit' }
   | { kind: 'model'; id?: string } // /model 查看；/model <id> 切换
+  | { kind: 'resume'; file?: string } // /resume 恢复最近会话；/resume <path> 指定
+  | { kind: 'memory' } // /memory 查看记忆状态
   | { kind: 'unknown'; name: string }; // 未知 / 命令
 
 /**
@@ -41,6 +43,10 @@ export function parseInput(raw: string): ParsedInput {
       return { kind: 'exit' };
     case 'model':
       return { kind: 'model', id: arg.length ? arg : undefined };
+    case 'resume':
+      return { kind: 'resume', file: arg.length ? arg : undefined };
+    case 'memory':
+      return { kind: 'memory' };
     default:
       return { kind: 'unknown', name };
   }
@@ -54,6 +60,8 @@ export const HELP_TEXT = [
   '  /model         查看当前模型',
   '  /model <id>    切换模型',
   '  /status        显示模型 / baseURL / 轮次 / Key 是否已配置',
+  '  /resume        从最近一次会话日志恢复上下文',
+  '  /memory        查看记忆状态（消息数 / 是否含摘要 / 当前日志）',
   '  /exit, /quit   退出',
   '',
   '直接输入文字即可作为任务下达给 Agent。',

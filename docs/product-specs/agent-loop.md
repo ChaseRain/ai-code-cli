@@ -1,6 +1,6 @@
 # Spec: Agent Loop
 
-> 状态：draft · 最后更新：2026-06-27 · 模块：`src/agent/`
+> 状态：implemented · 最后更新：2026-06-27 · 模块：`src/agent/`（tests/agent-loop.test.ts 覆盖）
 
 ## 职责
 编排 `决策→工具→结果→再决策`，只编排、不直接做 IO/渲染/HTTP。强制守护栏。

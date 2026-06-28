@@ -181,6 +181,42 @@ export function App(props: AppProps): React.JSX.Element {
           }
           return;
         }
+        case 'resume': {
+          push({ kind: 'user', text: trimmed });
+          const target =
+            parsed.file ?? Session.findLatestLog(session.rootDir, session.logFile);
+          if (!target) {
+            push({ kind: 'system', text: '没有可恢复的历史会话日志。' });
+            return;
+          }
+          try {
+            const { restored } = session.resumeFrom(target);
+            const restoredMsgs = session.messages();
+            const sysCount = restoredMsgs.filter((m) => m.role === 'system').length;
+            const view = messagesToView(restoredMsgs); // 已跳过 system，不刷屏
+            const note =
+              `已从 ${target} 恢复 ${restored} 条消息` +
+              (sysCount ? `（含 system 指令 ${sysCount} 条，不展示）。` : '。');
+            setMessages([{ kind: 'system', text: note }, ...view]);
+          } catch (err) {
+            push({ kind: 'error', text: `恢复失败：${(err as Error)?.message ?? String(err)}` });
+          }
+          return;
+        }
+        case 'memory': {
+          push({ kind: 'user', text: trimmed });
+          const st = session.memoryStats();
+          push({
+            kind: 'system',
+            text: [
+              `记忆状态：`,
+              `  消息数：${st.messages}（system ${st.system}）`,
+              `  含历史摘要：${st.hasSummary ? '是' : '否'}`,
+              `  当前会话日志：${st.logFile}`,
+            ].join('\n'),
+          });
+          return;
+        }
         case 'exit':
           exit();
           return;
@@ -285,7 +321,7 @@ export function App(props: AppProps): React.JSX.Element {
 // 子组件
 // ============================================================================
 
-function MessageList({ messages }: { messages: ViewMessage[] }): React.JSX.Element {
+export function MessageList({ messages }: { messages: ViewMessage[] }): React.JSX.Element {
   return (
     <Box flexDirection="column">
       {messages.map((m, i) => (
@@ -356,7 +392,7 @@ function MessageRow({ m }: { m: ViewMessage }): React.JSX.Element {
   }
 }
 
-function PermissionPrompt({ tool, args }: { tool: string; args: unknown }): React.JSX.Element {
+export function PermissionPrompt({ tool, args }: { tool: string; args: unknown }): React.JSX.Element {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
       <Text color="magenta" bold>
@@ -372,7 +408,7 @@ function PermissionPrompt({ tool, args }: { tool: string; args: unknown }): Reac
   );
 }
 
-function StatusBar({
+export function StatusBar({
   model,
   phase,
   turn,
@@ -404,6 +440,39 @@ function StatusBar({
 // ============================================================================
 // 文案 / 标签
 // ============================================================================
+
+/** 把恢复出的 Message[] 转成可渲染的 ViewMessage[]（用于 /resume 重建消息流）。
+ *  注意：内部 system 指令（系统提示 / 历史摘要）一律不渲染，避免 /resume 刷屏淹没证据。 */
+export function messagesToView(msgs: import('../core/types.js').Message[]): ViewMessage[] {
+  const view: ViewMessage[] = [];
+  const nameById = new Map<string, string>();
+  for (const m of msgs) {
+    switch (m.role) {
+      case 'system':
+        // 不展示内部 system 指令（系统提示 / 历史摘要）——它们留在上下文里，但不刷屏淹没证据。
+        break;
+      case 'user':
+        view.push({ kind: 'user', text: m.content });
+        break;
+      case 'assistant':
+        if (m.content) view.push({ kind: 'assistant', text: m.content, streaming: false });
+        for (const c of m.toolCalls ?? []) {
+          nameById.set(c.id, c.name);
+          view.push({ kind: 'tool-call', id: c.id, name: c.name, args: c.args });
+        }
+        break;
+      case 'tool':
+        view.push({
+          kind: 'tool-result',
+          id: m.toolCallId,
+          name: nameById.get(m.toolCallId) ?? m.toolCallId,
+          result: m.ok ? { ok: true, content: m.content } : { ok: false, error: m.content },
+        });
+        break;
+    }
+  }
+  return view;
+}
 
 function welcomeText(model: string): string {
   return [

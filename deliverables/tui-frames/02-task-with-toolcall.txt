@@ -1,0 +1,8 @@
+ai-code-cli —— 终端编码 Agent
+你 › 读取并总结 package.json
+助手
+我来读取 package.json。
+⚙ 调用  read_file {"path":"package.json"}
+✓ read_file { name: ai-code-cli, ... } (730 chars)
+助手
+这是一个基于 Anthropic 协议的 TUI 编码 Agent…

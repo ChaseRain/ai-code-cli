@@ -1,6 +1,6 @@
 # Spec: LLM Provider
 
-> 状态：draft · 最后更新：2026-06-27 · 模块：`src/provider/`
+> 状态：implemented · 最后更新：2026-06-27 · 模块：`src/provider/`（tests/provider.test.ts 覆盖）
 > 外部 API 事实来源：[`docs/references/coding-plan-platform.md`](../references/coding-plan-platform.md)
 > ⚠️ **协议=Anthropic Messages**（经实测，平台 OpenAI `/v1/chat/completions` 会**静默丢弃工具调用**；
 > Anthropic 端点原生支持 `tool_use` + 流式。见决策日志 D2 修订）。

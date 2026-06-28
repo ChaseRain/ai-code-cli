@@ -7,7 +7,7 @@
 // 真实文件 IO 仅限 Session 的 jsonl 落盘，写到临时目录，测试后清理。
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -223,3 +223,59 @@ function roleTag(m: Message): string {
   if (m.role === 'assistant' && m.toolCalls?.length) return 'assistant+tools';
   return m.role;
 }
+
+// ── R1：权限日志语义（只读 auto_allow / 敏感 allow / 拒绝 deny）─────────────
+
+/** 从会话 jsonl 读取所有 permission 记录的 effect。 */
+function permissionEffects(logFile: string): string[] {
+  return readFileSync(logFile, 'utf8')
+    .split('\n')
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l) as { kind: string; payload: { effect?: string } })
+    .filter((r) => r.kind === 'permission')
+    .map((r) => r.payload.effect ?? '');
+}
+
+describe('runAgent —— 权限日志语义 (R1)', () => {
+  it('只读工具自动放行记为 auto_allow（不与用户授权混淆）', async () => {
+    const tools = new ToolRegistry([makeReadTool([])]);
+    const session = new Session({ rootDir, id: 'auto' });
+    const permission = new Permission(allowAsker);
+    const provider = new MockProvider({
+      scripts: [scriptToolCall('c', 'echo', {}), scriptText('done')],
+    });
+    const { onEvent } = collector();
+    await runAgent('x', { provider, tools, permission, session }, {
+      model: 'm', maxTurns: 25, signal: new AbortController().signal, onEvent,
+    });
+    expect(permissionEffects(session.logFile)).toEqual(['auto_allow']);
+  });
+
+  it('敏感工具经用户允许记为 allow', async () => {
+    const tools = new ToolRegistry([makeWriteTool({ executed: false })]);
+    const session = new Session({ rootDir, id: 'allow' });
+    const permission = new Permission(allowAsker);
+    const provider = new MockProvider({
+      scripts: [scriptToolCall('w', 'do_write', {}), scriptText('done')],
+    });
+    const { onEvent } = collector();
+    await runAgent('x', { provider, tools, permission, session }, {
+      model: 'm', maxTurns: 25, signal: new AbortController().signal, onEvent,
+    });
+    expect(permissionEffects(session.logFile)).toEqual(['allow']);
+  });
+
+  it('敏感工具被拒绝记为 deny', async () => {
+    const tools = new ToolRegistry([makeWriteTool({ executed: false })]);
+    const session = new Session({ rootDir, id: 'deny2' });
+    const permission = new Permission(denyAsker);
+    const provider = new MockProvider({
+      scripts: [scriptToolCall('w', 'do_write', {}), scriptText('done')],
+    });
+    const { onEvent } = collector();
+    await runAgent('x', { provider, tools, permission, session }, {
+      model: 'm', maxTurns: 25, signal: new AbortController().signal, onEvent,
+    });
+    expect(permissionEffects(session.logFile)).toEqual(['deny']);
+  });
+});

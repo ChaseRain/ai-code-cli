@@ -1,6 +1,6 @@
 # Spec: 权限控制
 
-> 状态：draft · 最后更新：2026-06-27 · 模块：`src/permission/`
+> 状态：implemented · 最后更新：2026-06-27 · 模块：`src/permission/`（tests/permission.test.ts 覆盖）
 > 安全相关：这是本项目的安全边界，由 harness 强制，模型无法绕过。
 
 ## 职责
@@ -19,6 +19,18 @@
 
 ## 拒绝处理（强制）
 拒绝 → 不执行 → 生成 `ToolResult{ ok:false, error:'user denied permission' }` → **进入会话上下文**（满足「拒绝结果进入会话」），让模型据此调整后续动作。
+
+## 权限日志语义（R1，避免混淆）
+工具放行有两种来源，日志须区分，不可都记成普通 `allow`：
+
+| 来源 | 是否经用户确认 | 日志 `effect` |
+|---|---|---|
+| 只读工具自动放行 | 否（只读无需确认） | **`auto_allow`** |
+| 敏感工具用户允许（一次 / 本会话始终） | 是 | `allow` |
+| 敏感工具用户拒绝 | 是 | `deny`（且 denial 入上下文） |
+
+> 即：`permission allow` 仅代表「敏感操作经用户授权」；只读工具的自动执行记为 `auto_allow`，
+> 避免评审把「只读无需确认」误读成「逐次请求并允许」。落在 `loop`（决策点），写入 `session` jsonl。
 
 ## 接口（草案）
 ```ts

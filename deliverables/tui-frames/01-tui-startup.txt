@@ -1,0 +1,5 @@
+ai-code-cli —— 终端编码 Agent
+模型 deepseek/deepseek-v4-pro · 输入 /help 查看命令 · 直接输入文字下达任务 · Esc 中断 · Ctrl+C 退出
+› 输入任务或 / 命令（/help）
+
+模型 deepseek/deepseek-v4-pro · 轮次 0/25 · 状态 空闲 · Key 已配置
