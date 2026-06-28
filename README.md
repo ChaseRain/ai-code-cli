@@ -8,6 +8,59 @@
 
 ---
 
+## 设计哲学：Harness 工程 + DDD
+
+本项目不是「写一个能跑的脚本」，而是按 **Harness（脚手架）工程**的思路构建——这套方法借鉴自 OpenAI《在智能体优先的世界中利用 Codex》（原文存档见 [`docs/references/harness-engineering.md`](docs/references/harness-engineering.md)），并贯穿整个仓库。
+
+> **Harness = 模型之外的一切**：Agent 循环、工具、上下文管理、解析、错误处理、可观测性。
+> 模型负责**决策**，harness 负责**执行与守护栏**（权限确认、最大轮次、超时重试、路径沙箱）。
+
+它落在三个层面：
+
+### 1) 代码仓库即「记录系统」，AGENTS.md 是地图而非手册
+
+不把规则堆进一个巨大的说明文件，而是把知识结构化进 `docs/`，用一份精简的 [`AGENTS.md`](AGENTS.md)（≈100 行）作**地图**，指向更深的真相来源，实现**渐进式披露**：
+
+```
+AGENTS.md            ← 入口地图（读这个先）
+ARCHITECTURE.md      ← 系统分层与依赖规则
+docs/design-docs/    ← 操作原则 + DDD 设计（用例/领域/时序）
+docs/product-specs/  ← 各功能域规格（每篇带状态/测试覆盖）
+docs/exec-plans/     ← 计划与决策日志（一等工件）
+docs/references/     ← 外部事实唯一来源（理念原文/命题/平台 API）
+```
+
+凡是运行时进不了上下文的知识（聊天记录、脑子里的约定）对 Agent 都不存在——所以一切都版本化进仓库、交叉链接、单一真相来源。
+
+### 2) DDD 分层抽象：上层不清晰，不进下层
+
+设计严格遵循 **用例 → 领域 → 系统 → 编码** 的分层（详见 [`docs/design-docs/index.md`](docs/design-docs/index.md)），先定**限界上下文与统一语言**，再谈实现：
+
+| 抽象层 | 产物 |
+|---|---|
+| ① 用例 | [`use-cases.md`](docs/design-docs/use-cases.md)（谁、想达成什么 + 用例图） |
+| ② 领域 | [`domain-model.md`](docs/design-docs/domain-model.md)（限界上下文 / 聚合 / 不变量 + 上下文映射、类图） |
+| ③ 系统 | [`ARCHITECTURE.md`](ARCHITECTURE.md)（分层 → 代码目录的落地映射） |
+| ④ 编码 | `src/` + [`docs/product-specs/`](docs/product-specs/index.md) |
+
+六个限界上下文：核心域 **Agent 编排（Conversation）**，支撑域 **Tooling / Authorization**，通用域 **Model Gateway / Configuration**，表现层 **TUI**。
+
+> **关于启动/入口文件的特别说明（DDD 组合根）**
+> `src/cli.tsx` 是整个应用唯一的 **Composition Root（组合根）**：它本身**不含任何业务逻辑**，
+> 只做一件事——把各限界上下文按依赖方向**装配并注入**起来：
+> `dotenv 加载 .env → loadConfig（Configuration）→ 构造 Provider（Model Gateway）→ 注册 Tools（Tooling）→ Permission（Authorization）→ Session（会话）→ 交给 runAgent（核心域 Agent 编排）→ render TUI（表现层）`。
+> 这样领域逻辑与「如何启动、依赖从哪来」彻底解耦：换 Provider、换工具集、改权限策略，都只动组合根的装配，不动核心域。
+> 依赖规则（见 ARCHITECTURE.md）由结构强制：`agent/loop` 只编排不做 IO；`provider` 不认识 `tools`；`tui` 不内嵌业务。
+
+### 3) 任何改动都依托这套 harness——也因此极易扩展、可由 AI 直接托管
+
+- **改动的入口是规格，不是代码**：要加一个工具 / 换协议 / 调权限，先在对应 `product-specs/*.md` 改契约，再落到对应限界上下文。结构本身在引导「该改哪、不该碰哪」，把改动半径锁死在一个上下文内。
+- **错误即数据 / 守护栏内建**：工具错误、权限拒绝、超时都转成结构化结果回喂模型；权限、轮次上限、路径沙箱由 harness 强制，不靠模型自觉——这让自动化改动是**安全**的。
+- **扩展性强**：`Provider` 是协议无关抽象（已实测从 OpenAI 切到 Anthropic 只是换具体实现）；工具是统一 `Tool` 接口；新增能力是「加一个文件 + 一篇 spec + 一组测试」，不牵动全局。
+- **AI 托管可行性高**：因为全部知识都在仓库内、版本化、Agent 可读，边界清晰、不变量可机械校验、测试矩阵齐全——一个编码 Agent 能**直接从仓库推理出完整业务域**并自主扩展，无需外部上下文。本项目本身就是范例：它的代码就是由多 Agent 工作流按这套 `docs/` 规格自动生成的。
+
+---
+
 ## 安装
 
 需要 Node.js 22（LTS）。
