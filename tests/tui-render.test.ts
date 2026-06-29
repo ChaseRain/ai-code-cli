@@ -11,10 +11,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { App, MessageList, PermissionPrompt, StatusBar, messagesToView } from '../src/tui/App.js';
+import { App, MessageList, PermissionPrompt, RestorePrompt, StatusBar, messagesToView } from '../src/tui/App.js';
 import { MockProvider } from '../src/provider/mock.js';
 import { ToolRegistry } from '../src/tools/registry.js';
 import { Session } from '../src/session/index.js';
+import { PlanStore, formatPlanSnapshot } from '../src/plan/index.js';
 import type { ViewMessage } from '../src/tui/messages.js';
 import type { Message } from '../src/core/types.js';
 
@@ -81,6 +82,27 @@ describe('TUI 渲染冒烟 (R4)', () => {
     unmount();
   });
 
+  it('③b restore 确认提示：恢复前必须显式确认', () => {
+    const { lastFrame, unmount } = render(
+      React.createElement(RestorePrompt, { id: 'cp-1' }),
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('确认恢复 checkpoint');
+    expect(frame).toContain('cp-1');
+    expect(frame).toMatch(/\[y\]/);
+    expect(frame).toMatch(/\[n\]/);
+    unmount();
+  });
+
+  it('③c memory 压缩事件作为 system 消息可见', () => {
+    const messages: ViewMessage[] = [
+      { kind: 'system', text: '已自动压缩上下文：压缩了 10 条旧消息' },
+    ];
+    const { lastFrame, unmount } = render(React.createElement(MessageList, { messages }));
+    expect(lastFrame() ?? '').toContain('已自动压缩上下文');
+    unmount();
+  });
+
   // R1：/resume 不把内部 system prompt 刷屏（messagesToView 不渲染 system）
   it('⑤ messagesToView 不渲染内部 system prompt（防 /resume 刷屏泄漏）', () => {
     const LONG_SYSTEM = '你是一个运行在终端里的编码 Agent…'.repeat(50);
@@ -102,6 +124,30 @@ describe('TUI 渲染冒烟 (R4)', () => {
     // 渲染出来也不应出现 system prompt 内容
     const { lastFrame, unmount } = render(React.createElement(MessageList, { messages: view }));
     expect(lastFrame() ?? '').not.toContain('运行在终端里的编码 Agent');
+    unmount();
+  });
+
+  // TP5：/plan 在 TUI 的展示路径（系统消息 = formatPlanSnapshot 的输出）
+  it('⑥ Task Plan：/plan 展示当前计划（步骤 + 状态）', () => {
+    const store = new PlanStore();
+    store.update({
+      explanation: '三步走',
+      items: [
+        { step: '读取', status: 'completed' },
+        { step: '修改', status: 'in_progress' },
+        { step: '测试', status: 'pending' },
+      ],
+    });
+    // /plan 命令把 formatPlanSnapshot 的结果作为 system 消息 push 进消息流。
+    const messages: ViewMessage[] = [
+      { kind: 'system', text: formatPlanSnapshot(store.current()) },
+    ];
+    const { lastFrame, unmount } = render(React.createElement(MessageList, { messages }));
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('任务计划');
+    expect(frame).toContain('读取');
+    expect(frame).toContain('修改');
+    expect(frame).toContain('in_progress');
     unmount();
   });
 

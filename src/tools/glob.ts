@@ -4,6 +4,12 @@
 import fg from 'fast-glob';
 import path from 'node:path';
 import type { Tool, ToolContext, ToolResult } from '../core/types.js';
+import {
+  resolveInRoot,
+  assertGlobInRoot,
+  globLiteralPrefix,
+  PathEscapeError,
+} from './path-guard.js';
 
 interface GlobArgs {
   /** glob 模式，如 src 下递归匹配 .ts */
@@ -33,9 +39,19 @@ export const glob: Tool = {
     if (!pattern) return { ok: false, error: 'glob 缺少参数：pattern' };
     try {
       const root = path.resolve(ctx.rootDir);
-      // fast-glob 始终以 root 为 cwd；cwd 子目录折进 pattern 前缀，确保不逃逸根。
-      const base = cwd ? path.posix.join(cwd.split(path.sep).join('/'), '') : '';
-      const effective = base ? `${base.replace(/\/$/, '')}/${pattern}` : pattern;
+      // P7-E：pattern 不得经 .. / 绝对路径逃逸（fast-glob 不净化 ..）。
+      assertGlobInRoot(pattern);
+      // cwd 折进 pattern 前缀；额外 lexical + realpath 校验（防 .. 与 symlink cwd）。
+      let base = '';
+      if (cwd) {
+        assertGlobInRoot(cwd);
+        resolveInRoot(root, cwd); // 越界（含 symlink）抛 PathEscapeError
+        base = `${cwd.split(path.sep).join('/').replace(/\/$/, '')}/`;
+      }
+      const effective = base ? base + pattern : pattern;
+      // P7-E：literal 前缀若是指向 root 外的 symlink，显式拒绝（可审计）。
+      const prefix = globLiteralPrefix(effective);
+      if (prefix) resolveInRoot(root, prefix);
 
       const matches = await fg(effective, {
         cwd: root,
@@ -45,10 +61,20 @@ export const glob: Tool = {
         suppressErrors: true,
       });
 
-      if (matches.length === 0) {
+      // 后置防御：命中结果逐一 realpath 校验，丢弃越界项（symlink 等兜底）。
+      const safe = matches.filter((rel) => {
+        try {
+          resolveInRoot(root, rel);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+
+      if (safe.length === 0) {
         return { ok: true, content: '(无匹配)' };
       }
-      const sorted = matches.sort();
+      const sorted = safe.sort();
       const shown = sorted.slice(0, MAX_RESULTS);
       const notice =
         sorted.length > MAX_RESULTS
@@ -56,6 +82,7 @@ export const glob: Tool = {
           : '';
       return { ok: true, content: shown.join('\n') + notice };
     } catch (err) {
+      if (err instanceof PathEscapeError) return { ok: false, error: err.message };
       return { ok: false, error: `glob 失败：${(err as Error).message}` };
     }
   },

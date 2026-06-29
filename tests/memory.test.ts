@@ -14,7 +14,12 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Session, SUMMARY_PREFIX, type Summarizer } from '../src/session/index.js';
+import {
+  Session,
+  SUMMARY_PREFIX,
+  createHeuristicSummarizer,
+  type Summarizer,
+} from '../src/session/index.js';
 import type { Message } from '../src/core/types.js';
 
 let rootDir: string;
@@ -200,5 +205,28 @@ describe('Session.maybeCompact —— 上下文压缩', () => {
         expect(hasCaller).toBe(true);
       }
     }
+  });
+});
+
+describe('HeuristicSummarizer —— 默认本地摘要器', () => {
+  it('A9：不依赖网络，输出旧消息数量、用户意图和工具信息', async () => {
+    const summarizer = createHeuristicSummarizer();
+    const summary = await summarizer.summarize(
+      [
+        { role: 'user', content: '请读取 package.json' },
+        {
+          role: 'assistant',
+          content: '调用工具',
+          toolCalls: [{ id: 'c1', name: 'read_file', args: { path: 'package.json' } }],
+        },
+        { role: 'tool', toolCallId: 'c1', content: '{}', ok: true },
+        { role: 'assistant', content: '读完了' },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(summary).toContain('压缩了 4 条旧消息');
+    expect(summary).toContain('请读取 package.json');
+    expect(summary).toContain('read_file(c1)');
   });
 });

@@ -14,6 +14,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -27,7 +28,9 @@ export type LogKind =
   | 'tool_result'
   | 'permission'
   | 'error'
-  | 'summary';
+  | 'summary'
+  | 'checkpoint'
+  | 'restore';
 
 /**
  * 摘要器（记忆压缩用，见 product-specs/memory.md）。可注入：测试用 Mock，真实模型可选。
@@ -39,6 +42,41 @@ export interface Summarizer {
 
 /** 压缩后注入的摘要消息前缀（便于识别 / memoryStats 判定 hasSummary）。 */
 export const SUMMARY_PREFIX = '[此前对话摘要]\n';
+export const DEFAULT_MEMORY_THRESHOLD_MSGS = 40;
+export const DEFAULT_MEMORY_KEEP_RECENT = 16;
+/** Phase-6 LH7：resume 日志大小硬上限（超过明确报错，不全量读入内存）。 */
+export const MAX_RESUME_BYTES = 8 * 1024 * 1024;
+
+/** 默认本地摘要器：确定性、无网络依赖，供实时 Loop 自动压缩使用。 */
+export class HeuristicSummarizer implements Summarizer {
+  async summarize(older: Message[], signal: AbortSignal): Promise<string> {
+    if (signal.aborted) throw new Error('memory compaction aborted');
+    const counts = countRoles(older);
+    const userNotes = older
+      .filter((m) => m.role === 'user')
+      .map((m) => oneLine(m.content))
+      .filter(Boolean)
+      .slice(-3);
+    const toolNotes = older
+      .flatMap((m) =>
+        m.role === 'assistant'
+          ? (m.toolCalls ?? []).map((call) => `${call.name}(${call.id})`)
+          : [],
+      )
+      .slice(-5);
+    return [
+      `压缩了 ${older.length} 条旧消息：user ${counts.user}，assistant ${counts.assistant}，tool ${counts.tool}。`,
+      userNotes.length ? `近期用户意图：${userNotes.join(' / ')}` : '',
+      toolNotes.length ? `涉及工具：${toolNotes.join(', ')}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+}
+
+export function createHeuristicSummarizer(): Summarizer {
+  return new HeuristicSummarizer();
+}
 
 /**
  * jsonl 落盘的一行。统一信封：ts（ISO 时间戳）+ kind + payload。
@@ -68,6 +106,19 @@ function fileTimestamp(d: Date): string {
   return d.toISOString().replace(/[:.]/g, '-');
 }
 
+function countRoles(messages: Message[]): { user: number; assistant: number; tool: number } {
+  return {
+    user: messages.filter((m) => m.role === 'user').length,
+    assistant: messages.filter((m) => m.role === 'assistant').length,
+    tool: messages.filter((m) => m.role === 'tool').length,
+  };
+}
+
+function oneLine(text: string, max = 80): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  return compact.length > max ? `${compact.slice(0, max)}...` : compact;
+}
+
 /**
  * Session：会话聚合根。
  * - 内存历史 = messages()，喂给 Provider 的唯一上下文。
@@ -82,6 +133,9 @@ export class Session {
   private history: Message[] = [];
   /** 当前会话日志文件绝对路径。 */
   private logPath: string;
+  /** 日志路径唯一性兜底：上次时间戳与进程内单调序号（同毫秒冲突时递增）。 */
+  private lastTs = '';
+  private logSeq = 0;
 
   constructor(opts: SessionOptions = {}) {
     this.rootDir = opts.rootDir ?? process.cwd();
@@ -158,6 +212,13 @@ export class Session {
    * 恢复只改内存历史；新消息仍写入当前（新）日志文件，不污染被恢复的旧日志。
    */
   resumeFrom(logPath: string): { restored: number } {
+    // LH7：先 stat，超上限明确报错，绝不把超大 jsonl 全量读入内存（防 OOM）。
+    const size = statSync(logPath).size;
+    if (size > MAX_RESUME_BYTES) {
+      throw new Error(
+        `会话日志过大（${size} bytes > ${MAX_RESUME_BYTES} 上限），无法恢复，请用 /sessions 查看摘要`,
+      );
+    }
     const raw = readFileSync(logPath, 'utf8');
     const rebuilt: Message[] = [];
     for (const line of raw.split('\n')) {
@@ -206,7 +267,7 @@ export class Session {
           rebuilt.splice(sysCount, replaced, summaryMsg);
           break;
         }
-        // permission / error：不进上下文，跳过。
+        // permission / error / checkpoint / restore：不进上下文，跳过。
       }
     }
     this.history = rebuilt;
@@ -311,6 +372,16 @@ export class Session {
     this.writeLog('error', payload);
   }
 
+  /** 记录 checkpoint 事件。过程记录只落 jsonl，不进入 provider messages 上下文。 */
+  logCheckpoint(payload: unknown): void {
+    this.writeLog('checkpoint', payload);
+  }
+
+  /** 记录 restore 事件。过程记录只落 jsonl，不进入 provider messages 上下文。 */
+  logRestore(payload: unknown): void {
+    this.writeLog('restore', payload);
+  }
+
   // ── 内部 ───────────────────────────────────────────────────────────────
 
   /** 当前日志文件绝对路径（测试/复盘用）。 */
@@ -318,9 +389,23 @@ export class Session {
     return this.logPath;
   }
 
-  /** 生成一个新日志文件路径：<rootDir>/.ai_history/logs/<timestamp>-<id>.jsonl。 */
+  /**
+   * 生成一个新日志文件路径：`<rootDir>/.ai_history/logs/<timestamp>-<id>[-<seq>].jsonl`。
+   * 唯一性不变量（见 session-context.md）：同一进程内每次调用都返回唯一路径——
+   * 当时间戳分辨率不足（同一毫秒内连续 clear）时，用进程内单调序号兜底，
+   * 序号置于时间戳之后，保持文件名「时间戳在前」可排序、历史文件无需迁移。
+   */
   private newLogPath(): string {
-    const name = `${fileTimestamp(new Date())}-${this.id}.jsonl`;
+    const ts = fileTimestamp(new Date());
+    let name: string;
+    if (ts === this.lastTs) {
+      this.logSeq += 1;
+      name = `${ts}-${this.id}-${this.logSeq}.jsonl`;
+    } else {
+      this.lastTs = ts;
+      this.logSeq = 0;
+      name = `${ts}-${this.id}.jsonl`;
+    }
     return join(this.rootDir, '.ai_history', 'logs', name);
   }
 

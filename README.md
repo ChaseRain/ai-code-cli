@@ -108,32 +108,45 @@ npm start          # node dist/cli.js
 |---|---|
 | `/help` | 显示帮助 |
 | `/clear` | 清空当前会话上下文（开新日志文件） |
-| `/model` | 查看当前模型 |
-| `/model <id>` | 切换模型 |
+| `/model` / `/model <id>` | 查看 / 切换当前模型 |
 | `/status` | 显示模型 / baseURL / 最大轮次 / Key 是否已配置 |
+| `/resume` | 从最近一次会话日志恢复上下文 |
+| `/sessions` | 列出本地历史会话（最近 50） |
+| `/memory` | 查看记忆状态（消息数 / 是否含摘要 / 当前日志） |
+| `/checkpoint [label]` | 创建本地可恢复快照 |
+| `/checkpoints` | 列出本地 checkpoint（最近 50） |
+| `/restore <id>` | 确认后恢复指定 checkpoint |
+| `/changes` | 查看 Git / 工作区变更概览 |
+| `/diff [path]` | 查看全部或指定路径 diff |
+| `/undo-last` | 确认后恢复最近一次自动 checkpoint |
+| `/plan` / `/plan clear` | 查看 / 清空当前任务计划 |
 | `/exit`、`/quit` | 退出 |
 
-命令名大小写不敏感。
+命令名大小写不敏感。命令清单的唯一真相来源是 `src/tui/command.ts` 的 `HELP_TEXT`。
 
 ## 测试
 
 ```bash
-npm test           # vitest run（73 个用例，覆盖 config/provider/tools/permission/loop/session/tui）
+npm test           # vitest run（当前 213/213，以 npm test 输出为准）
 ```
 
-覆盖矩阵见 [`docs/product-specs/index.md`](docs/product-specs/index.md)。
+覆盖 config/provider/tools/permission/agent-loop/session/tui + memory/checkpoint/session-browser/diff-git/task-plan/guardrails。
+覆盖矩阵与各阶段验收计数见 [`docs/product-specs/index.md`](docs/product-specs/index.md)。
 
 ## 架构
 
 | 目录 | 职责 |
 |---|---|
-| `src/cli.tsx` | 入口：装配 config/provider/tools/permission/session，启动 TUI |
-| `src/config/` | 配置加载·合并·校验·密钥脱敏 |
+| `src/cli.tsx` | 入口（组合根）：装配 config/provider/tools/permission/session/checkpoint/plan，启动 TUI |
+| `src/config/` | 配置加载·合并·校验·密钥脱敏（含硬上限） |
 | `src/provider/` | Anthropic Messages（SSE/超时/重试）+ Mock |
-| `src/tools/` | 工具注册表 + 7 原子工具 + 路径沙箱守护 |
+| `src/tools/` | 注册表 + 7 原子工具 + `update_plan` + 路径沙箱(realpath)/大小限制(`limits.ts`)/glob 逃逸守护 |
 | `src/permission/` | 权限策略 + 会话级 allowlist |
-| `src/agent/` | Agent Loop 编排（守护栏：maxTurns / abort） |
-| `src/session/` | 内存历史 + `.ai_history/logs/*.jsonl` 持久化 |
+| `src/agent/` | Agent Loop 编排（守护栏：maxTurns / abort；记忆自动压缩触发） |
+| `src/session/` | 内存历史 + `.ai_history/logs/*.jsonl` 持久化 + resume/压缩 + Session Browser（`browser.ts`） |
+| `src/checkpoint/` | 本地 checkpoint/restore 快照（原子 id / 资源预算 / list limit） |
+| `src/workspace/` | Git 探测、status、diff、降级摘要、写前 preview（git timeout/输出上限） |
+| `src/plan/` | 任务计划内存状态（`PlanStore`，供 `update_plan` 与 `/plan` 共享） |
 | `src/tui/` | Ink 组件 + 内置命令解析 |
 
 设计文档（渐进式披露，从 `AGENTS.md` 入口）：

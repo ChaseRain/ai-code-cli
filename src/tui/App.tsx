@@ -9,13 +9,29 @@ import { Box, Text, useApp, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 
 import { runAgent } from '../agent/index.js';
-import type { AgentPhase, UIEvent } from '../agent/index.js';
+import type { AgentPhase, MemoryCompactionOptions, UIEvent } from '../agent/index.js';
 import type { Tool } from '../core/types.js';
 import { Permission } from '../permission/index.js';
 import type { PermissionAsker } from '../permission/index.js';
 import type { ToolRegistry } from '../tools/index.js';
 import type { Provider } from '../core/types.js';
-import { Session } from '../session/index.js';
+import {
+  DEFAULT_MEMORY_KEEP_RECENT,
+  DEFAULT_MEMORY_THRESHOLD_MSGS,
+  Session,
+  createHeuristicSummarizer,
+  listSessions,
+  resolveSessionLog,
+} from '../session/index.js';
+import { CheckpointStore } from '../checkpoint/index.js';
+import { PlanStore, formatPlanSnapshot } from '../plan/index.js';
+import {
+  findLatestAutoCheckpoint,
+  formatDiffResult,
+  formatWorkspaceStatus,
+  getWorkspaceDiff,
+  getWorkspaceStatus,
+} from '../workspace/index.js';
 import type { ViewMessage } from './messages.js';
 import { summarizeArgs } from './messages.js';
 import { parseInput, HELP_TEXT } from './command.js';
@@ -34,6 +50,10 @@ export interface AppProps {
   apiKeyConfigured: boolean;
   /** 用给定 model 构造一个 Provider；/model 切换时复用。null=未配置 Key（仅本地命令可用）。 */
   makeProvider: (model: string) => Provider | null;
+  checkpointStore?: CheckpointStore;
+  memoryCompaction?: MemoryCompactionOptions;
+  /** 与 update_plan 工具共享的同一个 PlanStore（由 cli 注入）。 */
+  planStore?: PlanStore;
 }
 
 /** 一次待用户决策的权限请求（弹窗用）。 */
@@ -60,6 +80,23 @@ export function App(props: AppProps): React.JSX.Element {
   const [turn, setTurn] = useState(0);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingPermission | null>(null);
+  const [pendingRestore, setPendingRestore] = useState<string | null>(null);
+
+  const checkpointStore = useMemo(
+    () => props.checkpointStore ?? new CheckpointStore(session.rootDir),
+    [props.checkpointStore, session.rootDir],
+  );
+  const memoryCompaction = useMemo<MemoryCompactionOptions>(
+    () =>
+      props.memoryCompaction ?? {
+        thresholdMsgs: DEFAULT_MEMORY_THRESHOLD_MSGS,
+        keepRecent: DEFAULT_MEMORY_KEEP_RECENT,
+        summarizer: createHeuristicSummarizer(),
+      },
+    [props.memoryCompaction],
+  );
+  // 与 update_plan 工具共享同一 PlanStore；未注入时新建（隔离场景/测试）。
+  const planStore = useMemo(() => props.planStore ?? new PlanStore(), [props.planStore]);
 
   // 运行期可变引用：避免闭包捕获过期值。
   const abortRef = useRef<AbortController | null>(null);
@@ -126,6 +163,12 @@ export function App(props: AppProps): React.JSX.Element {
         case 'tool_call':
           push({ kind: 'tool-call', id: e.id, name: e.name, args: e.args });
           break;
+        case 'tool_preview':
+          push({ kind: 'system', text: e.content });
+          break;
+        case 'memory_compacted':
+          push({ kind: 'system', text: e.content });
+          break;
         case 'tool_result':
           push({ kind: 'tool-result', id: e.id, name: e.name, result: e.result });
           break;
@@ -184,7 +227,9 @@ export function App(props: AppProps): React.JSX.Element {
         case 'resume': {
           push({ kind: 'user', text: trimmed });
           const target =
-            parsed.file ?? Session.findLatestLog(session.rootDir, session.logFile);
+            parsed.file
+              ? resolveSessionLog(session.rootDir, parsed.file, session.logFile)
+              : Session.findLatestLog(session.rootDir, session.logFile);
           if (!target) {
             push({ kind: 'system', text: '没有可恢复的历史会话日志。' });
             return;
@@ -203,6 +248,25 @@ export function App(props: AppProps): React.JSX.Element {
           }
           return;
         }
+        case 'sessions': {
+          push({ kind: 'user', text: trimmed });
+          // Phase-6 LH3：默认只展示最近 50 条，避免大量日志全量读取阻塞 TUI。
+          const SESSIONS_LIMIT = 50;
+          const summaries = listSessions(session.rootDir, session.logFile, { limit: SESSIONS_LIMIT });
+          if (summaries.length === 0) {
+            push({ kind: 'system', text: '暂无历史会话。' });
+            return;
+          }
+          push({
+            kind: 'system',
+            text: summaries
+              .map((s) =>
+                `${s.current ? '*' : ' '} ${s.id} · ${s.title} · ${s.messages} msg · ${s.toolCalls} tools · ${s.updatedAt}`,
+              )
+              .join('\n'),
+          });
+          return;
+        }
         case 'memory': {
           push({ kind: 'user', text: trimmed });
           const st = session.memoryStats();
@@ -215,6 +279,110 @@ export function App(props: AppProps): React.JSX.Element {
               `  当前会话日志：${st.logFile}`,
             ].join('\n'),
           });
+          return;
+        }
+        case 'checkpoint': {
+          push({ kind: 'user', text: trimmed });
+          try {
+            const cp = await checkpointStore.create({
+              label: parsed.label,
+              trigger: 'manual',
+              sessionLog: session.logFile,
+            });
+            session.logCheckpoint({
+              id: cp.id,
+              trigger: cp.trigger,
+              label: cp.label,
+              files: cp.files.length,
+            });
+            push({
+              kind: 'system',
+              text: `已创建 checkpoint ${cp.id}（${cp.files.length} 个文件，排除 ${cp.excluded.length} 项）。`,
+            });
+          } catch (err) {
+            push({ kind: 'error', text: `checkpoint 创建失败：${(err as Error).message}` });
+          }
+          return;
+        }
+        case 'checkpoints': {
+          push({ kind: 'user', text: trimmed });
+          try {
+            // LH6：默认只展示最近 50 条，避免全量解析所有 manifest。
+            const CHECKPOINTS_LIMIT = 50;
+            const cps = await checkpointStore.list({ limit: CHECKPOINTS_LIMIT });
+            if (cps.length === 0) {
+              push({ kind: 'system', text: '暂无 checkpoint。' });
+              return;
+            }
+            const total = await checkpointStore.count();
+            const lines = cps.map(
+              (c) => `${c.id} · ${c.trigger} · ${c.label ?? '-'} · ${c.files.length} files · ${c.createdAt}`,
+            );
+            if (total > cps.length) {
+              lines.push(`（共 ${total} 个，仅展示最近 ${cps.length} 个）`);
+            }
+            push({ kind: 'system', text: lines.join('\n') });
+          } catch (err) {
+            push({ kind: 'error', text: `checkpoint 列表读取失败：${(err as Error).message}` });
+          }
+          return;
+        }
+        case 'restore': {
+          push({ kind: 'user', text: trimmed });
+          if (!parsed.id) {
+            push({ kind: 'error', text: 'restore 缺少 checkpoint id。' });
+            return;
+          }
+          setPendingRestore(parsed.id);
+          push({ kind: 'system', text: `确认恢复 checkpoint ${parsed.id}？按 y 确认，n/Esc 取消。` });
+          return;
+        }
+        case 'changes': {
+          push({ kind: 'user', text: trimmed });
+          try {
+            const status = await getWorkspaceStatus(session.rootDir, checkpointStore);
+            push({ kind: 'system', text: formatWorkspaceStatus(status) });
+          } catch (err) {
+            push({ kind: 'error', text: `工作区状态读取失败：${(err as Error).message}` });
+          }
+          return;
+        }
+        case 'diff': {
+          push({ kind: 'user', text: trimmed });
+          try {
+            const diff = await getWorkspaceDiff(session.rootDir, parsed.path);
+            push({ kind: 'system', text: formatDiffResult(diff) });
+          } catch (err) {
+            push({ kind: 'error', text: `diff 读取失败：${(err as Error).message}` });
+          }
+          return;
+        }
+        case 'undo-last': {
+          push({ kind: 'user', text: trimmed });
+          try {
+            const checkpoint = await findLatestAutoCheckpoint(checkpointStore);
+            if (!checkpoint) {
+              push({ kind: 'system', text: '暂无可恢复的自动 checkpoint。' });
+              return;
+            }
+            setPendingRestore(checkpoint.id);
+            push({
+              kind: 'system',
+              text: `确认恢复最近自动 checkpoint ${checkpoint.id}？按 y 确认，n/Esc 取消。`,
+            });
+          } catch (err) {
+            push({ kind: 'error', text: `自动 checkpoint 查询失败：${(err as Error).message}` });
+          }
+          return;
+        }
+        case 'plan': {
+          push({ kind: 'user', text: trimmed });
+          if (parsed.sub === 'clear') {
+            planStore.clear();
+            push({ kind: 'system', text: '已清空当前任务计划。' });
+          } else {
+            push({ kind: 'system', text: formatPlanSnapshot(planStore.current()) });
+          }
           return;
         }
         case 'exit':
@@ -246,15 +414,47 @@ export function App(props: AppProps): React.JSX.Element {
 
       await runAgent(
         parsed.text,
-        { provider, tools, permission, session },
+        { provider, tools, permission, session, checkpoint: checkpointStore, memory: memoryCompaction },
         { model, maxTurns, signal: ac.signal, onEvent },
       );
     },
-    [apiKeyConfigured, baseURL, exit, makeProvider, maxTurns, model, onEvent, permission, push, session, tools, turn],
+    [apiKeyConfigured, baseURL, checkpointStore, exit, makeProvider, maxTurns, memoryCompaction, model, onEvent, permission, planStore, push, session, tools, turn],
+  );
+
+  const confirmRestore = useCallback(
+    async (id: string) => {
+      setPendingRestore(null);
+      try {
+        const r = await checkpointStore.restore(id);
+        session.logRestore(r);
+        push({
+          kind: 'system',
+          text:
+            `已恢复 checkpoint ${r.id}：恢复 ${r.filesRestored} 个文件，删除 ${r.filesRemoved} 个新文件` +
+            (r.filesSkipped ? `，跳过 ${r.filesSkipped} 个文件` : '') +
+            (r.preRestoreCheckpoint ? `；恢复前 checkpoint：${r.preRestoreCheckpoint}` : '') +
+            '。',
+        });
+      } catch (err) {
+        push({ kind: 'error', text: `恢复失败：${(err as Error).message}` });
+      }
+    },
+    [checkpointStore, push, session],
   );
 
   // ── 键盘：权限弹窗按键 / 全局中断 ───────────────────────────────────────
   useInput((inputChar, key) => {
+    if (pendingRestore) {
+      const c = inputChar.toLowerCase();
+      if (c === 'y') void confirmRestore(pendingRestore);
+      else if (c === 'n' || key.escape) {
+        const id = pendingRestore;
+        setPendingRestore(null);
+        push({ kind: 'system', text: `已取消恢复 checkpoint ${id}。` });
+      }
+      return;
+    }
+
     const p = pendingRef.current;
     if (p) {
       // 弹窗模式：y=允许一次 / a=本会话始终 / n / esc=拒绝。
@@ -291,7 +491,9 @@ export function App(props: AppProps): React.JSX.Element {
     <Box flexDirection="column">
       <MessageList messages={messages} />
 
-      {pending ? (
+      {pendingRestore ? (
+        <RestorePrompt id={pendingRestore} />
+      ) : pending ? (
         <PermissionPrompt tool={pending.tool.name} args={pending.args} />
       ) : (
         <Box>
@@ -403,6 +605,21 @@ export function PermissionPrompt({ tool, args }: { tool: string; args: unknown }
         <Text color="green">[y]</Text> 允许一次 {'  '}
         <Text color="cyan">[a]</Text> 本会话始终允许 {'  '}
         <Text color="red">[n]</Text> 拒绝
+      </Text>
+    </Box>
+  );
+}
+
+export function RestorePrompt({ id }: { id: string }): React.JSX.Element {
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
+      <Text color="red" bold>
+        确认恢复 checkpoint：{id}
+      </Text>
+      <Text color="gray">该操作会覆盖 checkpoint 记录的文件，并可能删除当时不存在的新文件。</Text>
+      <Text>
+        <Text color="green">[y]</Text> 确认恢复 {'  '}
+        <Text color="red">[n]</Text> 取消
       </Text>
     </Box>
   );

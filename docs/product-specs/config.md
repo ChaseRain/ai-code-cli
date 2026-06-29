@@ -23,6 +23,10 @@
 }
 ```
 
+## 硬上限（Phase-7 P7-C，Loop 不失控）
+zod 除类型/正数外加 `.max()`：`timeoutMs ≤ 120000`（与 run_shell 上限一致）、`maxTurns ≤ 50`、`maxRetries ≤ 5`。
+超限报错并指出字段（如 `timeoutMs: ...≤120000`）；边界值（=上限）通过。见 [`guardrails-hardening.md`](guardrails-hardening.md)。
+
 ## 密钥处理（强制）
 - 优先 `process.env.ANTHROPIC_AUTH_TOKEN`（兼容 `CODEPLAN_API_KEY`）；可由 `.env`（gitignored）加载。
 - 允许配置文件 `apiKey` 兜底，但**永不打印、日志脱敏为 `***`**；`/status`、`/model` 仅显示「已配置/未配置」。

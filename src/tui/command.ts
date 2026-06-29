@@ -11,7 +11,15 @@ export type ParsedInput =
   | { kind: 'exit' }
   | { kind: 'model'; id?: string } // /model 查看；/model <id> 切换
   | { kind: 'resume'; file?: string } // /resume 恢复最近会话；/resume <path> 指定
+  | { kind: 'sessions' }
   | { kind: 'memory' } // /memory 查看记忆状态
+  | { kind: 'checkpoint'; label?: string }
+  | { kind: 'checkpoints' }
+  | { kind: 'restore'; id?: string }
+  | { kind: 'changes' }
+  | { kind: 'diff'; path?: string }
+  | { kind: 'undo-last' }
+  | { kind: 'plan'; sub?: 'clear' } // /plan 查看；/plan clear 清空
   | { kind: 'unknown'; name: string }; // 未知 / 命令
 
 /**
@@ -45,8 +53,24 @@ export function parseInput(raw: string): ParsedInput {
       return { kind: 'model', id: arg.length ? arg : undefined };
     case 'resume':
       return { kind: 'resume', file: arg.length ? arg : undefined };
+    case 'sessions':
+      return { kind: 'sessions' };
     case 'memory':
       return { kind: 'memory' };
+    case 'checkpoint':
+      return { kind: 'checkpoint', label: arg.length ? arg : undefined };
+    case 'checkpoints':
+      return { kind: 'checkpoints' };
+    case 'restore':
+      return { kind: 'restore', id: arg.length ? arg : undefined };
+    case 'changes':
+      return { kind: 'changes' };
+    case 'diff':
+      return { kind: 'diff', path: arg.length ? arg : undefined };
+    case 'undo-last':
+      return { kind: 'undo-last' };
+    case 'plan':
+      return { kind: 'plan', sub: arg.toLowerCase() === 'clear' ? 'clear' : undefined };
     default:
       return { kind: 'unknown', name };
   }
@@ -61,7 +85,16 @@ export const HELP_TEXT = [
   '  /model <id>    切换模型',
   '  /status        显示模型 / baseURL / 轮次 / Key 是否已配置',
   '  /resume        从最近一次会话日志恢复上下文',
+  '  /sessions      列出本地历史会话',
   '  /memory        查看记忆状态（消息数 / 是否含摘要 / 当前日志）',
+  '  /checkpoint    创建本地可恢复快照（可加 label）',
+  '  /checkpoints   列出本地 checkpoint',
+  '  /restore <id>  确认后恢复指定 checkpoint',
+  '  /changes       查看 Git/工作区变更概览',
+  '  /diff [path]   查看全部或指定路径 diff',
+  '  /undo-last     确认后恢复最近一次自动 checkpoint',
+  '  /plan          查看当前任务计划',
+  '  /plan clear    清空当前任务计划',
   '  /exit, /quit   退出',
   '',
   '直接输入文字即可作为任务下达给 Agent。',

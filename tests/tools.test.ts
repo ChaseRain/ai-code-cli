@@ -7,6 +7,7 @@
 // 另含各只读/写工具的基本正确性。
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -209,22 +210,52 @@ describe('run_shell', () => {
     // macOS 下 /tmp 可能是 /private/tmp 的符号链接，故用 basename 校验
     if (r.ok) expect(r.content).toContain(path.basename(rootDir));
   });
+
+  // Phase-6 LH2：输出内存硬上限——大输出受控且带截断提示
+  it('P6-A2：stdout 远超上限时长度受控并含截断提示', async () => {
+    // 打印约 100 万字符，远超 MAX_OUTPUT(30000)
+    const r = await runShell.execute(
+      { command: `node -e "process.stdout.write('x'.repeat(1000000))"` },
+      ctx(),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.content).toContain('输出过长已截断');
+      expect(r.content.length).toBeLessThan(40_000); // 受控（≈MAX_OUTPUT + 提示），非百万级
+    }
+  });
+
+  it('P6-A2：失败命令的 stderr 大输出也受控截断', async () => {
+    // 确定性 flush：在 write 回调里再 exit，避免 stderr 缓冲未写完就退出导致父进程只收到少量字节。
+    const r = await runShell.execute(
+      {
+        command: `node -e "process.stderr.write('e'.repeat(1000000), () => process.exit(2))"`,
+      },
+      ctx(),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain('输出过长已截断');
+      expect(r.error.length).toBeLessThan(80_000); // stdout+stderr 各自受控
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
 // ToolRegistry
 // ---------------------------------------------------------------------------
 describe('ToolRegistry', () => {
-  it('createDefaultRegistry 装入 7 个工具', () => {
+  it('createDefaultRegistry 装入 7 个内置工具 + update_plan（TP6）', () => {
     const reg = createDefaultRegistry();
-    expect(reg.list()).toHaveLength(7);
-    expect(builtinTools).toHaveLength(7);
+    expect(reg.list()).toHaveLength(8);
+    expect(builtinTools).toHaveLength(7); // 原 7 个文件/Shell 工具不退化
+    expect(reg.has('update_plan')).toBe(true);
   });
 
   it('toSchemas 输出 ToolSchema（name/description/parameters）', () => {
     const reg = createDefaultRegistry();
     const schemas = reg.toSchemas();
-    expect(schemas).toHaveLength(7);
+    expect(schemas).toHaveLength(8);
     for (const s of schemas) {
       expect(typeof s.name).toBe('string');
       expect(typeof s.description).toBe('string');
@@ -239,14 +270,15 @@ describe('ToolRegistry', () => {
       'write_file',
       'edit_file',
       'run_shell',
+      'update_plan',
     ]);
   });
 
-  it('readOnly 标记正确：只读 4 个，敏感 3 个', () => {
+  it('readOnly 标记正确：只读 5 个（含 update_plan），敏感 3 个', () => {
     const reg = createDefaultRegistry();
     const ro = reg.list().filter((t) => t.readOnly).map((t) => t.name);
     const rw = reg.list().filter((t) => !t.readOnly).map((t) => t.name);
-    expect(ro).toEqual(['list_dir', 'read_file', 'glob', 'grep']);
+    expect(ro).toEqual(['list_dir', 'read_file', 'glob', 'grep', 'update_plan']);
     expect(rw).toEqual(['write_file', 'edit_file', 'run_shell']);
   });
 
@@ -277,5 +309,70 @@ describe('ToolRegistry', () => {
     const r = await reg.execute('boom', {}, ctx());
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain('kaboom');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase-7 P7-B：工具文件大小上限
+// ---------------------------------------------------------------------------
+describe('P7-B 文件大小上限', () => {
+  const BIG = 12 * 1024 * 1024; // 12 MiB > 5 MiB 上限
+
+  it('read_file 超上限快速拒绝', async () => {
+    await fs.writeFile(path.join(rootDir, 'big.txt'), 'x'.repeat(BIG));
+    const r = await readFile.execute({ path: 'big.txt' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/过大/);
+  });
+
+  it('edit_file 超上限拒绝', async () => {
+    await fs.writeFile(path.join(rootDir, 'big.txt'), 'x'.repeat(BIG));
+    const r = await editFile.execute(
+      { path: 'big.txt', old_string: 'x', new_string: 'y' },
+      ctx(),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/过大/);
+  });
+
+  it('write_file 超上限 content 拒绝', async () => {
+    const r = await writeFile.execute({ path: 'out.txt', content: 'x'.repeat(BIG) }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/过大/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase-7 P7-D：run_shell 超时杀进程树，不悬挂、无残留
+// ---------------------------------------------------------------------------
+describe('P7-D run_shell 进程树清理', () => {
+  it('timeout 杀掉后台子进程树，外层不假死、无残留', async () => {
+    const marker = `CCMARK${process.pid}${Date.now()}`;
+    // 后台子进程持有 pipe；shell wait 阻塞 → 触发 timeout。
+    const command = `node -e "/*${marker}*/ setInterval(()=>{},1000)" & wait`;
+
+    try {
+      const guard = new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 15000));
+      const result = await Promise.race([
+        runShell.execute({ command, timeoutMs: 300 }, ctx()),
+        guard,
+      ]);
+
+      expect(result).not.toBe('hung'); // 不假死
+      expect(typeof result === 'object' && result.ok).toBe(false);
+
+      // 给进程组退出留一点时间，再确认无残留。
+      await new Promise((r) => setTimeout(r, 500));
+      let residual = '';
+      try {
+        residual = execFileSync('pgrep', ['-f', marker], { encoding: 'utf8' }).trim();
+      } catch {
+        residual = ''; // pgrep 无匹配 → 退出码 1
+      }
+      expect(residual).toBe('');
+    } finally {
+      // 兜底清理：即便断言失败也不残留进程。
+      try { execFileSync('pkill', ['-9', '-f', marker]); } catch { /* 无残留 */ }
+    }
   });
 });

@@ -1,6 +1,6 @@
 # Exec Plan: Phase 1 — 最小可用 TUI 编码 Agent
 
-> 状态：active（基线 M1-M5 + Round-2 R1–R6 已完成；仅「记忆压缩自动接入实时 loop」仍为 future） · 最后更新：2026-06-28
+> 状态：active（基线 M1-M5 + Round-2 R1–R6 已完成；记忆压缩自动接入已由 Phase-3 完成） · 最后更新：2026-06-28
 > 计划是一等工件：进度勾选 + 决策日志 + 验收记录随提交入库。
 
 ## 目标
@@ -46,7 +46,7 @@
 |---|---|---|---|
 | R1 | 权限日志语义 | 只读自动放行记为 `auto_allow`（不再与用户授权的 `allow` 混淆）；敏感工具仍需确认，拒绝 `deny` 且 denial 入上下文 | 见 [`permissions.md`](../../product-specs/permissions.md)「权限日志语义」；loop 测试断言 read-only→auto_allow / 确认→allow / 拒绝→deny |
 | R2 | 记忆·会话恢复 | `Session.resumeFrom(jsonl)` 重建 Message[]（tool_call 挂回前条 assistant，保 tool 配对）+ `findLatestLog` + `/resume` `/memory` 命令 | memory.md A5/A6；resume 重建顺序与配对正确；命令解析单测 |
-| R3 | 记忆·压缩（冲增强分） | `Session.maybeCompact({threshold,keepRecent,summarizer})` + 可注入 `Summarizer`（测试用 Mock）；压缩不破坏 tool 配对、system 保留、近窗保真 | memory.md A1–A4/A7 单测；**仅 Session 级实现+测试，未自动接入实时 loop（如实标注，不夸大）** |
+| R3 | 记忆·压缩（冲增强分） | `Session.maybeCompact({threshold,keepRecent,summarizer})` + 可注入 `Summarizer`（测试用 Mock）；压缩不破坏 tool 配对、system 保留、近窗保真 | memory.md A1–A4/A7 单测；实时 Loop 自动接入已由 Phase-3 完成 |
 | R4 | TUI 可验收 | ink-testing-library 渲染**真实生产组件**（`MessageList`/`PermissionPrompt`/`StatusBar`）+ **启动态完整 `<App>`** | tests/tui-render.test.ts 断言帧含关键文案；帧文本存 `deliverables/tui-frames/` |
 | R5 | 截图 | ink 帧→ansi→html→headless Chrome 出 PNG；snake.html 用 Chrome 直接截图 | `deliverables/screenshots/01..04.png` 真实存在；SCREENSHOTS.md 逐张链接 |
 | R6 | snake 证据 | 根 `snake.html`（Agent write_file 产物）迁入/覆盖 `deliverables/snake/snake.html`，清理根目录 | how.md 以 `.ai_history/.../jubwj3a9.jsonl` 为主证据；根目录无 snake.html |

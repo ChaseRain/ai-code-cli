@@ -4,6 +4,7 @@
 import fs from 'node:fs/promises';
 import type { Tool, ToolContext, ToolResult } from '../core/types.js';
 import { resolveInRoot, PathEscapeError } from './path-guard.js';
+import { MAX_TOOL_FILE_BYTES, humanBytes } from './limits.js';
 
 interface EditFileArgs {
   /** 相对项目根的文件路径 */
@@ -50,6 +51,14 @@ export const editFile: Tool = {
     }
     try {
       const abs = resolveInRoot(ctx.rootDir, file);
+      // P7-B：先 stat，超上限拒绝（不全读）。
+      const st = await fs.stat(abs);
+      if (st.size > MAX_TOOL_FILE_BYTES) {
+        return {
+          ok: false,
+          error: `文件过大：${file}（${humanBytes(st.size)} > 上限 ${humanBytes(MAX_TOOL_FILE_BYTES)}）；无法编辑`,
+        };
+      }
       const content = await fs.readFile(abs, 'utf8');
       const n = countOccurrences(content, old_string);
       if (n === 0) {

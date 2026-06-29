@@ -1,7 +1,7 @@
 # Spec: 记忆增强（Memory）
 
-> 状态：**partial（resume + 命令 + Session 级压缩已实现并测试；自动接入实时 loop 未做）** · 最后更新：2026-06-28
-> 模块：`src/session/`（resumeFrom / findLatestLog / maybeCompact / Summarizer）、`src/tui/`（`/resume` `/memory`）
+> 状态：**implemented（resume + Session 压缩 + 实时 Loop 自动压缩均已实现并测试）** · 最后更新：2026-06-28
+> 模块：`src/session/`（resumeFrom / findLatestLog / maybeCompact / Summarizer）、`src/agent/loop.ts`（自动压缩触发）、`src/tui/`（`/resume` `/memory` + 压缩事件展示）
 > 评审定位：**扩展/加分项**（L2 第五节「上下文压缩等」）。不替代、不弱化基础会话能力（见 [`session-context.md`](session-context.md)）。
 
 ## 实现状态（如实，不夸大）
@@ -11,13 +11,14 @@
 | 会话恢复 resume（jsonl→Message[]，含 summary 状态恢复） | ✅ 已实现 + 测试 | `Session.resumeFrom` / `findLatestLog`；tests/memory.test.ts（A5、A8） |
 | `/resume` `/memory` 命令 | ✅ 已实现 + 测试 | command.ts；tests/tui-command.test.ts（A6） |
 | 上下文压缩 maybeCompact（Mock summarizer） | ✅ Session 级已实现 + 测试 | tests/memory.test.ts（A1–A4、A7） |
-| 压缩**自动接入实时 Agent Loop** | ⛔ 未实现（future） | —（避免引入真实摘要模型依赖与 loop 行为变更，留作后续） |
+| 压缩**自动接入实时 Agent Loop** | ✅ 已实现 + 测试 | 默认本地 `HeuristicSummarizer`；Agent Loop 每轮请求模型前检查阈值；tests/agent-loop.test.ts（M9） |
 
 ## 目标
 在不破坏现有会话语义的前提下，给 Agent 加「记忆」：
 1. **会话恢复（Resume）**：从 `.ai_history/logs/*.jsonl` 恢复最近一次（或指定）会话上下文。
 2. **上下文压缩（Compaction / Summary）**：历史超阈值时，把较旧轮次摘要为一条 summary 消息，保留近窗 + 关键事实，控制 token 膨胀。
-3. **内置命令**：`/resume`（恢复最近会话）、`/memory`（**仅查看**记忆状态：消息数 / system 数 / 是否含摘要 hasSummary / 当前日志；不触发压缩）。
+3. **实时自动压缩**：Agent Loop 在每轮发起 `provider.chat` 前执行阈值检查，超限则压缩旧上下文，并发出 UI 事件。
+4. **内置命令**：`/resume`（恢复最近会话）、`/memory`（**仅查看**记忆状态：消息数 / system 数 / 是否含摘要 hasSummary / 当前日志；不触发压缩）。
 
 ## 设计契约（接口草案，最小集）
 
@@ -39,6 +40,18 @@ interface MemoryCapableSession {
 }
 ```
 
+Agent Loop 接入：
+
+```ts
+interface MemoryCompactionOptions {
+  thresholdMsgs: number;
+  keepRecent: number;
+  summarizer: Summarizer;
+}
+```
+
+默认摘要器为本地确定性实现，只做结构化摘要，不访问网络；真实模型摘要可作为未来可选扩展。
+
 ### 压缩规则（不变量，必须满足）
 1. **不破坏 tool 配对**：summary 的切割点不得落在 `assistant(tool_calls)` 与其对应 `tool` 结果之间——
    每个 `tool_call` 的 `tool_result` 必须与其 assistant 调用同处压缩边界的同一侧。
@@ -46,6 +59,7 @@ interface MemoryCapableSession {
 3. **summary 以一条独立消息注入**：插在被压缩区段位置，标记可识别（如 `role:'system'` 或带 `kind:'summary'`），后续轮次照常追加。
 4. **近窗保真**：最近 `keepRecent` 条消息原样保留，不进 summary。
 5. **可观测**：压缩动作落 `.ai_history/logs`（`kind:'summary'`），可复盘。
+6. **错误不阻断**：摘要失败只记录 `error` 并向 UI 发提示，不阻断本轮模型请求。
 
 ### Resume 规则
 0. 遇到 `summary` 记录：用 `payload.replaced` 把「前导 system 之后的旧消息段」替换为
@@ -54,7 +68,7 @@ interface MemoryCapableSession {
 2. 恢复后可继续对话；新消息写入**新日志文件**（不污染旧日志），或在原日志续写——二选一，实现时定并记录决策。
 3. 找不到日志 → 友好提示，不崩溃。
 
-## 验收项（Round-2 实现时必须满足）
+## 验收项
 
 | # | 验收 | 测试方式 |
 |---|---|---|
@@ -66,11 +80,22 @@ interface MemoryCapableSession {
 | A6 | `/resume` `/memory` 命令解析正确 | 命令解析单测（沿用 tui-command 测试） |
 | A7 | 阈值未到时 `maybeCompact` 为 no-op | 单测 |
 | A8 | append→maybeCompact→新 Session `resumeFrom` 后，messages 与压缩后 history 等价、hasSummary=true | 单测 |
+| A9 | Agent Loop 自动压缩：历史超过阈值时，请求 Provider 前完成压缩，Provider 收到压缩后的 messages | agent-loop 单测 |
+| A10 | 压缩失败不中断：Summarizer 抛错时，记录 error，Provider 仍被调用，任务可完成 | agent-loop 单测 |
+| A11 | TUI 可观测：压缩成功事件渲染为 system 消息，`/memory` 可看到 hasSummary=true | tui-render + memory 单测 |
 
-## 不做（即便 Round-2）
+## 不做
 - 跨项目/全局长期记忆库、向量检索 RAG。
 - 多会话并行管理 UI。
-- 真实模型摘要作为**默认**（默认 Mock/可选真实，避免测试依赖网络）。
+- 真实模型摘要作为**默认**（默认本地确定性摘要，避免测试依赖网络）。
+- 长期向量记忆、跨仓库个人知识库。
+
+## 验收记录
+
+2026-06-28：`npm run build && npm test` = **116/116** 通过；新增覆盖：
+- `tests/memory.test.ts`：默认本地摘要器输出旧消息数量、用户意图和工具信息。
+- `tests/agent-loop.test.ts`：Loop 请求 Provider 前自动压缩；摘要失败不阻断任务。
+- `tests/tui-render.test.ts`：压缩事件可作为 system 消息渲染。
 
 ## 关联
 - 基础会话 → [`session-context.md`](session-context.md)

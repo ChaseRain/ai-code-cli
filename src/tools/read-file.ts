@@ -4,6 +4,7 @@
 import fs from 'node:fs/promises';
 import type { Tool, ToolContext, ToolResult } from '../core/types.js';
 import { resolveInRoot, PathEscapeError } from './path-guard.js';
+import { MAX_TOOL_FILE_BYTES, humanBytes } from './limits.js';
 
 interface ReadFileArgs {
   /** 相对项目根的文件路径 */
@@ -38,6 +39,14 @@ export const readFile: Tool = {
     if (!file) return { ok: false, error: 'read_file 缺少参数：path' };
     try {
       const abs = resolveInRoot(ctx.rootDir, file);
+      // P7-B：先 stat，超上限直接拒绝（不整文件读入内存）。
+      const st = await fs.stat(abs);
+      if (st.size > MAX_TOOL_FILE_BYTES) {
+        return {
+          ok: false,
+          error: `文件过大：${file}（${humanBytes(st.size)} > 上限 ${humanBytes(MAX_TOOL_FILE_BYTES)}）；请用 grep/glob 或 run_shell 分段处理`,
+        };
+      }
       const raw = await fs.readFile(abs, 'utf8');
       const allLines = raw.split('\n');
       // 处理末尾换行造成的空末行

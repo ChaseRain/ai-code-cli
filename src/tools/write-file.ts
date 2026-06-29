@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Tool, ToolContext, ToolResult } from '../core/types.js';
 import { resolveInRoot, PathEscapeError } from './path-guard.js';
+import { MAX_TOOL_FILE_BYTES, humanBytes } from './limits.js';
 
 interface WriteFileArgs {
   /** 相对项目根的文件路径 */
@@ -29,6 +30,14 @@ export const writeFile: Tool = {
     const { path: file, content } = (args ?? {}) as WriteFileArgs;
     if (!file) return { ok: false, error: 'write_file 缺少参数：path' };
     if (content === undefined) return { ok: false, error: 'write_file 缺少参数：content' };
+    // P7-B：写入内容字节上限。
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (bytes > MAX_TOOL_FILE_BYTES) {
+      return {
+        ok: false,
+        error: `写入内容过大：${humanBytes(bytes)} > 上限 ${humanBytes(MAX_TOOL_FILE_BYTES)}；请拆分或改用 run_shell`,
+      };
+    }
     try {
       const abs = resolveInRoot(ctx.rootDir, file);
       await fs.mkdir(path.dirname(abs), { recursive: true });

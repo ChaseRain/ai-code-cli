@@ -8,4 +8,5 @@ export type {
   UIEvent,
   AgentPhase,
   EndReason,
+  MemoryCompactionOptions,
 } from './loop.js';

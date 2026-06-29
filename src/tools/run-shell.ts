@@ -14,11 +14,34 @@ interface RunShellArgs {
 
 const DEFAULT_TIMEOUT = 30_000;
 const MAX_TIMEOUT = 120_000;
-/** 输出截断上限（字符）。 */
+/** 输出内存硬上限（字符）。stdout / stderr 各自独立计上限。 */
 const MAX_OUTPUT = 30_000;
+const TRUNCATED_NOTE = '\n…(输出过长已截断)';
 
-function clip(s: string): string {
-  return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + '\n…(输出过长已截断)' : s;
+/**
+ * 有上限的输出缓冲：边读边截断，达到 MAX_OUTPUT 后丢弃后续内容（继续消费流但不再累积），
+ * 因此进程内存不会随高输出命令无限增长（Phase-6 LH2）。
+ */
+class CappedBuffer {
+  private buf = '';
+  truncated = false;
+  push(chunk: string): void {
+    if (this.buf.length >= MAX_OUTPUT) {
+      this.truncated = true;
+      return; // 已满：丢弃，避免 OOM
+    }
+    const room = MAX_OUTPUT - this.buf.length;
+    if (chunk.length > room) {
+      this.buf += chunk.slice(0, room);
+      this.truncated = true;
+    } else {
+      this.buf += chunk;
+    }
+  }
+  /** 渲染为文本，截断时附提示。 */
+  render(): string {
+    return this.truncated ? this.buf + TRUNCATED_NOTE : this.buf;
+  }
 }
 
 export const runShell: Tool = {
@@ -41,55 +64,79 @@ export const runShell: Tool = {
     const timeout = Math.min(Math.max(1, timeoutMs ?? DEFAULT_TIMEOUT), MAX_TIMEOUT);
 
     return new Promise<ToolResult>((resolve) => {
+      // P7-D：detached 让 child 成为进程组组长（pgid=pid），便于杀**整组**——
+      // 否则 shell 派生的后台子进程会被 reparent、持有 pipe，导致超时守护失效、Promise 悬挂。
       const child = spawn(command, {
         cwd: ctx.rootDir,
         shell: true,
-        signal: ctx.signal,
+        detached: true,
       });
 
-      let stdout = '';
-      let stderr = '';
+      const stdout = new CappedBuffer();
+      const stderr = new CappedBuffer();
       let timedOut = false;
+      let aborted = false;
       let settled = false;
 
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGKILL');
-      }, timeout);
+      /** 杀整个进程组（POSIX）；失败回退杀 child 本身。 */
+      const killTree = (sig: NodeJS.Signals): void => {
+        try {
+          if (child.pid) process.kill(-child.pid, sig);
+        } catch {
+          try {
+            child.kill(sig);
+          } catch {
+            /* 进程已退出 */
+          }
+        }
+      };
+
+      const onAbort = (): void => {
+        aborted = true;
+        killTree('SIGKILL');
+      };
 
       const finish = (result: ToolResult) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        ctx.signal.removeEventListener('abort', onAbort);
         resolve(result);
       };
 
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killTree('SIGKILL');
+      }, timeout);
+
+      if (ctx.signal.aborted) onAbort();
+      else ctx.signal.addEventListener('abort', onAbort, { once: true });
+
       child.stdout?.on('data', (d) => {
-        stdout += d.toString();
+        stdout.push(d.toString());
       });
       child.stderr?.on('data', (d) => {
-        stderr += d.toString();
+        stderr.push(d.toString());
       });
 
       child.on('error', (err) => {
-        // 包含 AbortSignal 触发的中断
-        if ((err as NodeJS.ErrnoException).name === 'AbortError') {
-          finish({ ok: false, error: 'run_shell 被中断' });
-          return;
-        }
         finish({ ok: false, error: `命令启动失败：${err.message}` });
       });
 
       child.on('close', (code, sig) => {
+        if (aborted) {
+          finish({ ok: false, error: 'run_shell 被中断' });
+          return;
+        }
         if (timedOut) {
           finish({
             ok: false,
-            error: `命令超时（${timeout}ms）被终止\n--- stdout ---\n${clip(stdout)}\n--- stderr ---\n${clip(stderr)}`,
+            error: `命令超时（${timeout}ms）被终止\n--- stdout ---\n${stdout.render()}\n--- stderr ---\n${stderr.render()}`,
           });
           return;
         }
         if (code === 0) {
-          const body = clip(stdout) || '(无输出)';
+          const body = stdout.render() || '(无输出)';
           finish({ ok: true, content: body });
           return;
         }
@@ -97,7 +144,7 @@ export const runShell: Tool = {
         const codeDesc = code === null ? `信号 ${sig}` : `退出码 ${code}`;
         finish({
           ok: false,
-          error: `命令失败（${codeDesc}）\n--- stdout ---\n${clip(stdout)}\n--- stderr ---\n${clip(stderr)}`,
+          error: `命令失败（${codeDesc}）\n--- stdout ---\n${stdout.render()}\n--- stderr ---\n${stderr.render()}`,
         });
       });
     });

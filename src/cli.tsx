@@ -15,6 +15,8 @@ import { AnthropicProvider } from './provider/index.js';
 import type { Provider } from './core/types.js';
 import { createDefaultRegistry } from './tools/index.js';
 import { Session } from './session/index.js';
+import { CheckpointStore } from './checkpoint/index.js';
+import { PlanStore } from './plan/index.js';
 import { App } from './tui/index.js';
 import { SYSTEM_PROMPT } from './core/system-prompt.js';
 
@@ -40,8 +42,11 @@ function main(): void {
   const session = new Session({ rootDir: cwd });
   session.append({ role: 'system', content: SYSTEM_PROMPT });
 
-  // ── 工具注册表（7 个内置原子工具）───────────────────────────────────────
-  const tools = createDefaultRegistry();
+  // ── 工具注册表（7 个内置原子工具 + update_plan）─────────────────────────
+  // PlanStore 在 cli 创建并同时注入工具与 TUI，保证 update_plan 工具与 /plan 命令共享同一计划。
+  const planStore = new PlanStore();
+  const tools = createDefaultRegistry(planStore);
+  const checkpointStore = new CheckpointStore(cwd);
 
   // ── Provider 工厂 ──────────────────────────────────────────────────────
   // /model 切换时按新 model 重建 Provider。未配置 Key 时返回 null（仅本地命令可用）。
@@ -75,6 +80,8 @@ function main(): void {
       maxTurns: config.maxTurns,
       apiKeyConfigured,
       makeProvider,
+      checkpointStore,
+      planStore,
     }),
   );
 

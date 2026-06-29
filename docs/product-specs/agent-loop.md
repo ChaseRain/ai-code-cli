@@ -1,13 +1,20 @@
 # Spec: Agent Loop
 
-> 状态：implemented · 最后更新：2026-06-27 · 模块：`src/agent/`（tests/agent-loop.test.ts 覆盖）
+> 状态：implemented · 最后更新：2026-06-28 · 模块：`src/agent/`（tests/agent-loop.test.ts 覆盖）
 
 ## 职责
 编排 `决策→工具→结果→再决策`，只编排、不直接做 IO/渲染/HTTP。强制守护栏。
 
 ## 接口（草案）
 ```ts
-interface AgentDeps { provider: Provider; tools: ToolRegistry; permission: Permission; session: Session; }
+interface AgentDeps {
+  provider: Provider;
+  tools: ToolRegistry;
+  permission: Permission;
+  session: Session;
+  checkpoint?: CheckpointStore;
+  memory?: MemoryCompactionOptions;
+}
 interface RunOpts { maxTurns: number; signal: AbortSignal; onEvent: (e: UIEvent) => void; }
 function runAgent(input: string, deps: AgentDeps, opts: RunOpts): Promise<void>;
 ```
@@ -16,6 +23,7 @@ function runAgent(input: string, deps: AgentDeps, opts: RunOpts): Promise<void>;
 ```
 session.append(user, input)
 for turn in 0..maxTurns:
+  maybeCompactMemory(session, deps.memory)       // 可选；失败只记录 error，不阻断
   events = provider.chat(session.messages, tools.schemas, signal)
   累积: assistant 文本(流式 onEvent) 与 tool_calls
   if 无 tool_calls: session.append(assistant 文本); return        // 最终回复
@@ -36,6 +44,8 @@ for turn in 0..maxTurns:
 - tool 结果被正确 append 并参与下一次请求。
 - `maxTurns` 触顶时优雅收尾，不无限循环。
 - abort 信号能中断在途请求。
+- 写类工具授权前发出 preview，允许后自动 checkpoint。
+- memory 自动压缩在 Provider 请求前发生；摘要失败不阻断任务。
 
 ## 不做（首期）
-并行工具执行、子 Agent、上下文压缩。
+并行工具执行、子 Agent。

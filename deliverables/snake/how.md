@@ -37,4 +37,5 @@ bash deliverables/snake/gen.sh   # set -a; source .env 取 ANTHROPIC_AUTH_TOKEN�
 - 无任何 `http(s)://` / `src=` / CDN 外链 —— 完全自包含，浏览器双击即玩。
 
 ## 运行截图
-见 [`../SCREENSHOTS.md`](../SCREENSHOTS.md) 第 4 项（贪吃蛇运行截图，待补）。
+已补齐：[`../screenshots/04-snake-running.png`](../screenshots/04-snake-running.png)——headless Chrome 对 Agent 产物 [`snake.html`](snake.html) 截图（画布 + 蛇身 + 食物 + 得分/最高分 + 方向键提示）。
+说明与复现见 [`../SCREENSHOTS.md`](../SCREENSHOTS.md) 第 4 项（`npx tsx deliverables/screenshots.ts 04`）。

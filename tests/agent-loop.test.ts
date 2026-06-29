@@ -7,7 +7,7 @@
 // 真实文件 IO 仅限 Session 的 jsonl 落盘，写到临时目录，测试后清理。
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +19,8 @@ import { Permission } from '../src/permission/index.js';
 import type { PermissionAsker } from '../src/permission/index.js';
 import { Session } from '../src/session/index.js';
 import type { Message, Tool, ToolResult } from '../src/core/types.js';
+import type { Summarizer } from '../src/session/index.js';
+import { CheckpointStore } from '../src/checkpoint/index.js';
 
 // ── 测试桩工具 ──────────────────────────────────────────────────────────────
 
@@ -215,6 +217,132 @@ describe('runAgent —— 主循环编排', () => {
 
     expect(provider.requests.length).toBe(0);
     expect(events.at(-1)).toEqual({ type: 'end', reason: 'aborted' });
+  });
+
+  it('M6：敏感工具允许后、执行前自动创建 checkpoint，并写入 session event', async () => {
+    writeFileSync(join(rootDir, 'seed.txt'), 'before', 'utf8');
+    const writeState = { executed: false };
+    const tools = new ToolRegistry([makeWriteTool(writeState)]);
+    const session = new Session({ rootDir, id: 'checkpoint-hook' });
+    const permission = new Permission(allowAsker);
+    const checkpoint = new CheckpointStore(rootDir);
+    const provider = new MockProvider({
+      scripts: [scriptToolCall('w', 'do_write', {}), scriptText('done')],
+    });
+
+    const { onEvent } = collector();
+    await runAgent('写入前留档', { provider, tools, permission, session, checkpoint }, {
+      model: 'm', maxTurns: 25, signal: new AbortController().signal, onEvent,
+    });
+
+    expect(writeState.executed).toBe(true);
+    const cps = await checkpoint.list();
+    expect(cps.length).toBeGreaterThan(0);
+    expect(cps[0].trigger).toBe('auto');
+
+    const kinds = readFileSync(session.logFile, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { kind: string });
+    expect(kinds.some((r) => r.kind === 'checkpoint')).toBe(true);
+  });
+
+  it('M8：敏感工具授权前发出写前 preview，且不阻断后续执行', async () => {
+    const writeState = { executed: false };
+    const tools = new ToolRegistry([makeWriteTool(writeState)]);
+    const session = new Session({ rootDir, id: 'preview' });
+    const permission = new Permission(allowAsker);
+    const provider = new MockProvider({
+      scripts: [scriptToolCall('w', 'do_write', { path: 'seed.txt' }), scriptText('done')],
+    });
+
+    const { events, onEvent } = collector();
+    await runAgent('写入前预览', { provider, tools, permission, session }, {
+      model: 'm', maxTurns: 25, signal: new AbortController().signal, onEvent,
+    });
+
+    expect(writeState.executed).toBe(true);
+    const preview = events.find((e) => e.type === 'tool_preview');
+    expect(preview).toMatchObject({
+      type: 'tool_preview',
+      id: 'w',
+      name: 'do_write',
+    });
+    expect(preview?.type === 'tool_preview' ? preview.content : '').toContain('seed.txt');
+
+    const previewIndex = events.findIndex((e) => e.type === 'tool_preview');
+    const awaitingIndex = events.findIndex(
+      (e) => e.type === 'phase' && e.phase === 'awaiting-permission',
+    );
+    expect(previewIndex).toBeGreaterThanOrEqual(0);
+    expect(awaitingIndex).toBeGreaterThan(previewIndex);
+  });
+
+  it('M9：实时 Loop 在请求 Provider 前自动压缩上下文', async () => {
+    const tools = new ToolRegistry([makeReadTool([])]);
+    const session = new Session({ rootDir, id: 'auto-memory' });
+    const permission = new Permission(allowAsker);
+    session.append({ role: 'system', content: 'SYS' });
+    for (let i = 0; i < 4; i++) {
+      session.append({ role: 'user', content: `old user ${i}` });
+      session.append({ role: 'assistant', content: `old assistant ${i}` });
+    }
+    const provider = new MockProvider({ scripts: scriptText('压缩后继续完成。') });
+    const summarizer: Summarizer = {
+      async summarize(older) {
+        return `auto summary ${older.length}`;
+      },
+    };
+
+    const { events, onEvent } = collector();
+    await runAgent('新任务', { provider, tools, permission, session, memory: {
+      thresholdMsgs: 6,
+      keepRecent: 2,
+      summarizer,
+    } }, {
+      model: 'm', maxTurns: 25, signal: new AbortController().signal, onEvent,
+    });
+
+    expect(session.memoryStats().hasSummary).toBe(true);
+    expect(provider.requests.length).toBe(1);
+    const sent = provider.requests[0].messages;
+    expect(sent.some((m) => m.role === 'system' && m.content.includes('auto summary'))).toBe(true);
+    expect(sent.length).toBeLessThan(10);
+    expect(events.some((e) => e.type === 'memory_compacted' && e.compacted)).toBe(true);
+  });
+
+  it('M9：摘要失败不阻断任务，错误落日志且 Provider 仍被调用', async () => {
+    const tools = new ToolRegistry([makeReadTool([])]);
+    const session = new Session({ rootDir, id: 'memory-fails-open' });
+    const permission = new Permission(allowAsker);
+    for (let i = 0; i < 4; i++) {
+      session.append({ role: 'user', content: `u${i}` });
+      session.append({ role: 'assistant', content: `a${i}` });
+    }
+    const provider = new MockProvider({ scripts: scriptText('仍然完成。') });
+    const summarizer: Summarizer = {
+      async summarize() {
+        throw new Error('summary boom');
+      },
+    };
+
+    const { events, onEvent } = collector();
+    await runAgent('继续', { provider, tools, permission, session, memory: {
+      thresholdMsgs: 4,
+      keepRecent: 2,
+      summarizer,
+    } }, {
+      model: 'm', maxTurns: 25, signal: new AbortController().signal, onEvent,
+    });
+
+    expect(provider.requests.length).toBe(1);
+    expect(session.messages().at(-1)).toEqual({ role: 'assistant', content: '仍然完成。' });
+    expect(events.some((e) => e.type === 'memory_compacted' && !e.compacted)).toBe(true);
+    const kinds = readFileSync(session.logFile, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { kind: string; payload: { where?: string } });
+    expect(kinds.some((r) => r.kind === 'error' && r.payload.where === 'memory.compaction')).toBe(true);
   });
 });
 

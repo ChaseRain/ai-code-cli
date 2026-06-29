@@ -88,12 +88,12 @@ describe('loadConfig — 深合并优先级（默认 ← 用户 ← 项目）', 
 
   it('项目级覆盖用户级；用户级独有字段保留；默认值保留', () => {
     writeUserConfig({ model: 'user-model', timeoutMs: 30000, maxTurns: 10 });
-    writeProjectConfig({ model: 'project-model', maxTurns: 99 });
+    writeProjectConfig({ model: 'project-model', maxTurns: 40 });
     const { config } = load();
 
     // 项目级覆盖
     expect(config.model).toBe('project-model');
-    expect(config.maxTurns).toBe(99);
+    expect(config.maxTurns).toBe(40);
     // 用户级独有、项目级未写 → 保留用户级
     expect(config.timeoutMs).toBe(30000);
     // 两层都没写 → 默认值
@@ -172,5 +172,29 @@ describe('密钥处理 — 环境优先、文件兜底、永不泄露', () => {
   it('redactSecret 永远返回 ***，不回显原文', () => {
     expect(redactSecret('super-secret-token')).toBe('***');
     expect(redactSecret(undefined)).toBe('***');
+  });
+
+  // Phase-7 P7-C：配置硬上限（Loop 不失控）
+  it('P7-C：边界值（=上限）通过', () => {
+    writeProjectConfig({ timeoutMs: 120000, maxTurns: 50, maxRetries: 5 });
+    const { config } = load();
+    expect(config.timeoutMs).toBe(120000);
+    expect(config.maxTurns).toBe(50);
+    expect(config.maxRetries).toBe(5);
+  });
+
+  it('P7-C：timeoutMs 超上限报错并指出字段', () => {
+    writeProjectConfig({ timeoutMs: 999999999 });
+    expect(() => load()).toThrow(/timeoutMs/);
+  });
+
+  it('P7-C：maxTurns 超上限报错并指出字段', () => {
+    writeProjectConfig({ maxTurns: 1000000000 });
+    expect(() => load()).toThrow(/maxTurns/);
+  });
+
+  it('P7-C：maxRetries 超上限报错并指出字段', () => {
+    writeProjectConfig({ maxRetries: 999999 });
+    expect(() => load()).toThrow(/maxRetries/);
   });
 });

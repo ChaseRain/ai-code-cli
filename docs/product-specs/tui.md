@@ -15,18 +15,29 @@
 assistant 文本随 SSE 增量刷新（消费 `provider` 经 `loop` 转发的 UIEvent）。
 
 ## 内置命令（`/` 前缀）
+
+> 命令清单唯一真相来源：`src/tui/command.ts` 的 `HELP_TEXT`；本表须与其同步。
+
 | 命令 | 行为 |
 |---|---|
 | `/help` | 显示命令与用法 |
 | `/clear` | 清空当前会话上下文（开新日志） |
-| `/model` | 查看当前模型；`/model <id>` 切换 |
+| `/model` / `/model <id>` | 查看 / 切换当前模型 |
 | `/status` | 显示模型、baseURL、轮次上限/当前轮次、Key 是否已配置（不显明文） |
 | `/resume` | 从最近一次 jsonl 日志恢复会话上下文（见 memory.md） |
+| `/sessions` | 列出本地历史会话（最近 50，见 session-browser.md） |
 | `/memory` | 查看记忆状态（消息数 / 是否含摘要 / 当前日志） |
+| `/checkpoint [label]` | 创建本地可恢复快照（见 checkpoint.md） |
+| `/checkpoints` | 列出本地 checkpoint（最近 50） |
+| `/restore <id>` | 确认后恢复指定 checkpoint |
+| `/changes` | 查看 Git / 工作区变更概览（见 diff-git.md） |
+| `/diff [path]` | 查看全部或指定路径 diff |
+| `/undo-last` | 确认后恢复最近一次自动 checkpoint |
+| `/plan` / `/plan clear` | 查看 / 清空当前任务计划（见 task-plan.md） |
 | `/exit`（`/quit`） | 退出程序 |
 
 ## 验收
-- 命令解析单测（含 `/model <id>` 带参、`/resume` `/memory`）。
+- 命令解析单测（`/model <id>` 带参、`/resume` `/sessions` `/memory`、`/checkpoint` `/checkpoints` `/restore`、`/changes` `/diff` `/undo-last`、`/plan` `/plan clear`；HELP_TEXT 含 `/plan` 防漂移）。
 - **Ink render 冒烟测试**（tests/tui-render.test.ts，ink-testing-library）：渲染**真实生产组件**
   （`MessageList` / `PermissionPrompt` / `StatusBar`）+ **启动态完整 `<App>`**，断言
   ① 启动欢迎/状态栏（完整 App）；② 工具调用/结果行；③ 权限弹窗（“需要授权”+y/a/n）；④ 状态栏状态流。

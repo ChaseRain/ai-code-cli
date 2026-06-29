@@ -34,9 +34,10 @@ const ConfigSchema = z
     provider: z.literal('anthropic'),
     model: z.string().min(1),
     baseURL: z.string().url(),
-    timeoutMs: z.number().int().positive(),
-    maxTurns: z.number().int().positive(),
-    maxRetries: z.number().int().nonnegative(),
+    // Phase-7 P7-C：硬上限，Loop 工程不能失控。
+    timeoutMs: z.number().int().positive().max(120000, 'timeoutMs 不能超过 120000（120s）'),
+    maxTurns: z.number().int().positive().max(50, 'maxTurns 不能超过 50'),
+    maxRetries: z.number().int().nonnegative().max(5, 'maxRetries 不能超过 5'),
   })
   .strict();
 

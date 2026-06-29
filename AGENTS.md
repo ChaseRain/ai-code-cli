@@ -36,11 +36,11 @@
 - **密钥**：API Key 永不入库、不打印、日志脱敏；优先环境变量 `ANTHROPIC_AUTH_TOKEN`（由 gitignored 的 `.env` 加载）。
 - **沉淀**：对话关键内容写入 `.ai_history/logs/`。
 
-## 命令（规划，落地后校正）
+## 命令（以 `package.json` scripts 为准）
 
-- 开发：`pnpm dev`（tsx 直跑）
-- 构建：`pnpm build` → 运行 `node dist/cli.js`
-- 测试：`pnpm test`（vitest，覆盖矩阵见 product-specs/index.md）
+- 开发：`npm run dev`（tsx 直跑 `src/cli.tsx`）
+- 构建：`npm run build`（tsc → `dist/`）→ 运行 `npm start`（即 `node dist/cli.js`）
+- 测试：`npm test`（vitest run，覆盖矩阵见 product-specs/index.md）
 
 ## 文档卫生（doc hygiene，硬性约定）
 

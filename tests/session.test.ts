@@ -4,11 +4,11 @@
 // - /clear 清空内存上下文并开新日志文件
 // - jsonl 落盘内容可被重新读取解析（user / assistant / tool_call / tool_result / permission / error）
 
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Session, type LogRecord } from '../src/session/index.js';
 import type { Message } from '../src/core/types.js';
@@ -95,6 +95,53 @@ describe('Session /clear', () => {
     expect(second).toHaveLength(1);
     expect(second[0].kind).toBe('user');
     expect((second[0].payload as { content: string }).content).toBe('第二轮');
+  });
+
+  // Phase-6 LH7：resume 超大日志明确报错，不全量读入内存（防 OOM）。
+  it('P6-B6：resumeFrom 超大 jsonl 抛明确错误，不 OOM', () => {
+    const s = new Session({ rootDir, id: 'huge' });
+    s.append({ role: 'user', content: 'seed' });
+    // 追加到 > 8 MiB（MAX_RESUME_BYTES）
+    appendFileSync(s.logFile, 'Z'.repeat(9 * 1024 * 1024), 'utf8');
+    const r = new Session({ rootDir, id: 'huge2' });
+    expect(() => r.resumeFrom(s.logFile)).toThrow(/会话日志过大/);
+  });
+
+  // 历史回归硬化：同一毫秒内连续 clear 也必须拿到唯一日志路径，旧日志不丢。
+  it('同一毫秒连续 clear 两次：3 个 logPath 全不同且旧日志保留', () => {
+    // 固定时钟到同一毫秒，模拟 newLogPath 在同毫秒内被多次调用。
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-28T00:00:00.000Z'));
+    try {
+      const s = new Session({ rootDir, id: 'same-ms' });
+      const log0 = s.logFile;
+      s.append({ role: 'user', content: 'r0' });
+
+      s.clear();
+      const log1 = s.logFile;
+      s.append({ role: 'user', content: 'r1' });
+
+      s.clear();
+      const log2 = s.logFile;
+      s.append({ role: 'user', content: 'r2' });
+
+      // 三个路径互不相同（即便时间戳相同）
+      expect(new Set([log0, log1, log2]).size).toBe(3);
+
+      // 旧日志都保留且内容正确（不被覆盖/丢失）
+      for (const [path, content] of [
+        [log0, 'r0'],
+        [log1, 'r1'],
+        [log2, 'r2'],
+      ] as const) {
+        expect(existsSync(path)).toBe(true);
+        const recs = readLog(path);
+        expect(recs).toHaveLength(1);
+        expect((recs[0].payload as { content: string }).content).toBe(content);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

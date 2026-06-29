@@ -20,6 +20,10 @@ import type { ToolRegistry } from '../tools/index.js';
 import type { Permission } from '../permission/index.js';
 import { denialResult } from '../permission/index.js';
 import type { Session } from '../session/index.js';
+import type { Summarizer } from '../session/index.js';
+import type { CheckpointStore } from '../checkpoint/index.js';
+import { checkpointTargetsForTool } from '../checkpoint/index.js';
+import { previewToolChange } from '../workspace/index.js';
 
 // ============================================================================
 // UI 事件契约 —— Loop 是唯一生产者，TUI 是消费者。
@@ -47,6 +51,10 @@ export type UIEvent =
   | { type: 'assistant_done'; content: string }
   // 模型决定调用某工具（参数已拼接完整）。
   | { type: 'tool_call'; id: string; name: string; args: unknown }
+  // 敏感工具执行前的变更预览摘要；用于权限确认前提示用户。
+  | { type: 'tool_preview'; id: string; name: string; content: string }
+  // 自动记忆压缩结果；成功/失败都可观测，但失败不阻断 Loop。
+  | { type: 'memory_compacted'; compacted: boolean; content: string }
   // 工具执行结果（成功或失败 / 权限拒绝，皆为数据）。
   | { type: 'tool_result'; id: string; name: string; result: ToolResult }
   // 致命错误（如 Provider 不可恢复异常）：UI 提示，循环收尾。
@@ -67,6 +75,14 @@ export interface AgentDeps {
   tools: ToolRegistry;
   permission: Permission;
   session: Session;
+  checkpoint?: CheckpointStore;
+  memory?: MemoryCompactionOptions;
+}
+
+export interface MemoryCompactionOptions {
+  thresholdMsgs: number;
+  keepRecent: number;
+  summarizer: Summarizer;
 }
 
 /** 单次 runAgent 的运行参数。 */
@@ -195,7 +211,7 @@ export async function runAgent(
   deps: AgentDeps,
   opts: RunOpts,
 ): Promise<void> {
-  const { provider, tools, permission, session } = deps;
+  const { provider, tools, permission, session, checkpoint, memory } = deps;
   const { model, maxTurns, signal, onEvent } = opts;
 
   // 用户输入入历史（同时落 jsonl）。
@@ -211,6 +227,7 @@ export async function runAgent(
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     onEvent({ type: 'phase', phase: 'thinking', turn, maxTurns });
+    await maybeCompactMemory(session, memory, signal, onEvent);
 
     // ── 1. 决策：调用模型，流式累积 ──────────────────────────────────────
     let outcome: TurnOutcome;
@@ -272,13 +289,22 @@ export async function runAgent(
       onEvent({ type: 'tool_call', id: tc.id, name: tc.name, args: tc.args });
 
       const tool = tools.get(tc.name);
-      let result: ToolResult;
+      let result: ToolResult | undefined;
 
       if (!tool) {
         // 未知工具：错误即数据，回喂模型让其纠正。
         result = { ok: false, error: `未知工具：${tc.name}` };
       } else {
         // 权限决策：只读直过；写类经 asker（可能弹窗阻塞）。
+        if (!tool.readOnly) {
+          const preview = previewToolChange(session.rootDir, tc.name, tc.args);
+          onEvent({
+            type: 'tool_preview',
+            id: tc.id,
+            name: tc.name,
+            content: preview.summary,
+          });
+        }
         onEvent({
           type: 'phase',
           phase: tool.readOnly ? 'calling-tool' : 'awaiting-permission',
@@ -313,15 +339,43 @@ export async function runAgent(
             effect: tool.readOnly ? 'auto_allow' : 'allow',
           });
           onEvent({ type: 'phase', phase: 'calling-tool', turn, maxTurns });
-          // tools.execute 已把工具自身异常收敛为 ok:false，不会抛出。
-          result = await tools.execute(tc.name, tc.args, {
-            rootDir: session.rootDir,
-            signal,
-          });
+          if (!tool.readOnly && checkpoint) {
+            try {
+              const cp = await checkpoint.create({
+                trigger: 'auto',
+                label: `before ${tc.name}`,
+                sessionLog: session.logFile,
+                targets: checkpointTargetsForTool(tc.name, tc.args),
+              });
+              session.logCheckpoint({
+                id: cp.id,
+                trigger: cp.trigger,
+                label: cp.label,
+                toolCallId: tc.id,
+                tool: tc.name,
+                files: cp.files.length,
+              });
+            } catch (err) {
+              result = {
+                ok: false,
+                error: `checkpoint 创建失败，已取消执行 ${tc.name}：${(err as Error).message}`,
+              };
+            }
+          }
+          if (!result) {
+            // tools.execute 已把工具自身异常收敛为 ok:false，不会抛出。
+            result = await tools.execute(tc.name, tc.args, {
+              rootDir: session.rootDir,
+              signal,
+            });
+          }
         }
       }
 
       // 工具结果（成功/失败/拒绝）入历史，参与下一轮请求。
+      if (!result) {
+        result = { ok: false, error: `工具 ${tc.name} 未返回结果` };
+      }
       session.append({
         role: 'tool',
         toolCallId: tc.id,
@@ -346,6 +400,38 @@ export async function runAgent(
 // ============================================================================
 // 辅助
 // ============================================================================
+
+async function maybeCompactMemory(
+  session: Session,
+  memory: MemoryCompactionOptions | undefined,
+  signal: AbortSignal,
+  onEvent: (e: UIEvent) => void,
+): Promise<void> {
+  if (!memory || signal.aborted) return;
+  try {
+    const result = await session.maybeCompact({
+      thresholdMsgs: memory.thresholdMsgs,
+      keepRecent: memory.keepRecent,
+      summarizer: memory.summarizer,
+      signal,
+    });
+    if (result.compacted) {
+      onEvent({
+        type: 'memory_compacted',
+        compacted: true,
+        content: `已自动压缩上下文：${result.summary ?? 'summary created'}`,
+      });
+    }
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    session.logError({ message, where: 'memory.compaction' });
+    onEvent({
+      type: 'memory_compacted',
+      compacted: false,
+      content: `上下文压缩失败，已继续执行：${message}`,
+    });
+  }
+}
 
 /** 把 ToolResult 归一为字符串文本（供 session 存储 / 回喂模型）。 */
 function toolResultText(result: ToolResult): string {
