@@ -52,6 +52,20 @@ zod 除类型/正数外加 `.max()`：`timeoutMs ≤ 120000`（与 run_shell 上
 - **脱敏一致性**：记忆配置不含密钥；`summarizer="llm"` 复用既有 Provider 与密钥处理，不另存凭据，沿用「永不打印、脱敏 `***`」规则。
 - `/memory` 展示**生效配置**（合并 + env 覆盖后的最终值）。
 
+## 技能配置（Phase-11，详见 [`skills.md`](skills.md)）
+新增 `skills` 字段（可选，缺省回落默认值；与现有字段一致走「项目级覆盖用户级」深合并）：
+```jsonc
+{
+  "skills": {
+    "enabled": true            // 是否启用技能系统（默认 true）
+  }
+}
+```
+- **默认值**：`enabled=true`（沿用 memory 子对象的合并/校验模式）。
+- **优先级**：默认值 ← 用户级 ← 项目级，沿用既有**深合并**（`skills` 子字段逐项合并）。
+- **关闭效果**：`enabled=false` 时 cli 不发现技能、不注入 L1 目录、不注册 `use_skill` 工具；`/skills` 提示已禁用。
+- **脱敏一致性**：技能配置不含密钥；技能正文按数据处理（见 skills.md 安全边界），不另存凭据。
+
 ## 密钥处理（强制）
 - 优先 `process.env.ANTHROPIC_AUTH_TOKEN`（兼容 `CODEPLAN_API_KEY`）；可由 `.env`（gitignored）加载。
 - 允许配置文件 `apiKey` 兜底，但**永不打印、日志脱敏为 `***`**；`/status`、`/model` 仅显示「已配置/未配置」。
@@ -62,6 +76,7 @@ zod 除类型/正数外加 `.max()`：`timeoutMs ≤ 120000`（与 run_shell 上
 - 校验失败给出清晰错误，不崩溃。
 - 密钥不出现在任何日志/状态输出中。
 - **（Phase-9）** `memory` 子字段项目级覆盖用户级（深合并、未覆盖项保留）；`AI_CODE_MEMORY_*` 覆盖文件配置；缺省回落记忆默认值；超上限/非法 summarizer 枚举报错并指出字段。
+- **（Phase-11）** `skills.enabled` 缺省默认 true；项目级覆盖用户级（深合并）；关闭时不注入技能目录、不注册 `use_skill` 工具。
 
 ## 不做（首期）
 环境变量覆盖全部字段、多 profile、远程配置。

@@ -2,11 +2,15 @@
 // 覆盖 tui.md「命令执行单测（Phase-10 Q1）」：注入 fake deps，断言各命令的 CommandOutcome
 //   （echoUser / messages / effect），IO 失败收敛为 error 消息（不抛）。纯逻辑，无渲染依赖。
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createCommandExecutor } from '../src/tui/command-executor.js';
 import type { CommandDeps } from '../src/tui/command-executor.js';
 import { parseInput } from '../src/tui/command.js';
 import { PlanStore } from '../src/plan/index.js';
+import { SkillRegistry } from '../src/skills/index.js';
 import type { SessionSummary } from '../src/session/index.js';
 
 // ── fake session：只实现执行器用到的成员 ────────────────────────────────────
@@ -52,6 +56,7 @@ function mkExecutor(deps: Partial<CommandDeps> = {}) {
     status: deps.status ?? STATUS,
     summarizerLabel: deps.summarizerLabel ?? 'heuristic',
     memory: deps.memory,
+    skills: deps.skills,
     listSessions: deps.listSessions,
     getWorkspaceStatus: deps.getWorkspaceStatus,
     getWorkspaceDiff: deps.getWorkspaceDiff,
@@ -272,6 +277,37 @@ describe('CommandExecutor —— checkpoint 家族', () => {
     expect(o.effect).toEqual({ type: 'confirm-restore', id: 'auto1' });
     expect(o.messages[0].text).toMatch(/确认恢复最近自动 checkpoint auto1/);
   });
+
+  it('/rewind 无参 空列表 → 提示，effect none', async () => {
+    const list = vi.fn().mockResolvedValue([]);
+    const o = await run(mkExecutor({ checkpointStore: fakeCheckpointStore({ list }) }), '/rewind');
+    expect(o.messages[0].text).toMatch(/暂无可回滚的 checkpoint/);
+    expect(o.effect).toEqual({ type: 'none' });
+  });
+
+  it('/rewind 无参 有数据 → open-checkpoint-picker（index 0）', async () => {
+    const items = [
+      { id: 'cp2', trigger: 'manual', label: 'b', files: [1], createdAt: 't2' },
+      { id: 'cp1', trigger: 'auto', label: undefined, files: [1, 2], createdAt: 't1' },
+    ];
+    const list = vi.fn().mockResolvedValue(items);
+    const o = await run(mkExecutor({ checkpointStore: fakeCheckpointStore({ list }) }), '/rewind');
+    expect(o.effect).toEqual({ type: 'open-checkpoint-picker', items, index: 0 });
+    expect(o.messages).toEqual([]);
+  });
+
+  it('/rewind <id> → confirm-restore（等价 /restore <id>）', async () => {
+    const o = await run(mkExecutor(), '/rewind cp9');
+    expect(o.effect).toEqual({ type: 'confirm-restore', id: 'cp9' });
+    expect(o.messages[0].text).toMatch(/确认回滚到 checkpoint cp9/);
+  });
+
+  it('/rewind 列举失败 → error（不抛）', async () => {
+    const list = vi.fn().mockRejectedValue(new Error('io boom'));
+    const o = await run(mkExecutor({ checkpointStore: fakeCheckpointStore({ list }) }), '/rewind');
+    expect(o.messages[0].kind).toBe('error');
+    expect(o.messages[0].text).toMatch(/io boom/);
+  });
 });
 
 describe('CommandExecutor —— /changes /diff', () => {
@@ -333,6 +369,64 @@ describe('CommandExecutor —— /plan', () => {
     const o = await run(mkExecutor({ planStore }), '/plan clear');
     expect(o.messages[0].text).toMatch(/已清空当前任务计划/);
     expect(planStore.current()).toBeNull();
+  });
+});
+
+// ── /skills（Phase-11）────────────────────────────────────────────────────────
+describe('CommandExecutor —— /skills', () => {
+  let root: string;
+  let reg: SkillRegistry;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cmd-skills-'));
+    const userDir = join(root, 'skills');
+    const dir = join(userDir, 'demo');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'SKILL.md'), '---\nname: demo\ndescription: 演示技能\n---\n演示正文', 'utf8');
+    reg = new SkillRegistry({ userDir, projectDir: join(root, 'none') });
+    reg.discover();
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('未注入 registry → 提示已禁用', async () => {
+    const o = await run(mkExecutor(), '/skills');
+    expect(o.effect).toEqual({ type: 'none' });
+    expect(o.messages[0].text).toMatch(/已禁用/);
+  });
+
+  it('/skills 列目录（含 name/description/source）', async () => {
+    const o = await run(mkExecutor({ skills: reg }), '/skills');
+    expect(o.effect).toEqual({ type: 'none' });
+    expect(o.messages[0].kind).toBe('system');
+    expect(o.messages[0].text).toMatch(/可用技能/);
+    expect(o.messages[0].text).toMatch(/demo/);
+    expect(o.messages[0].text).toMatch(/演示技能/);
+    expect(o.messages[0].text).toMatch(/user/);
+  });
+
+  it('/skills <name> → 看正文', async () => {
+    const o = await run(mkExecutor({ skills: reg }), '/skills demo');
+    expect(o.messages[0].kind).toBe('system');
+    expect(o.messages[0].text).toBe('演示正文');
+  });
+
+  it('/skills <missing> → error 带可用列表', async () => {
+    const o = await run(mkExecutor({ skills: reg }), '/skills nope');
+    expect(o.messages[0].kind).toBe('error');
+    expect(o.messages[0].text).toMatch(/未知技能/);
+  });
+
+  it('启用但无技能 → 友好提示', async () => {
+    const empty = new SkillRegistry({
+      userDir: join(root, 'empty-u'),
+      projectDir: join(root, 'empty-p'),
+    });
+    empty.discover();
+    const o = await run(mkExecutor({ skills: empty }), '/skills');
+    expect(o.messages[0].text).toMatch(/暂无可用技能/);
   });
 });
 

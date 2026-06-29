@@ -72,6 +72,12 @@ describe('parseInput —— 内置命令解析', () => {
     expect(parseInput('/restore cp-1')).toEqual({ kind: 'restore', id: 'cp-1' });
   });
 
+  it('/rewind 无参打开快照选择器；带参直接回滚（主流约定）', () => {
+    expect(parseInput('/rewind')).toEqual({ kind: 'rewind', id: undefined });
+    expect(parseInput('/rewind cp-1')).toEqual({ kind: 'rewind', id: 'cp-1' });
+    expect(parseInput('/REWIND')).toEqual({ kind: 'rewind', id: undefined }); // 命令名大小写不敏感
+  });
+
   it('M8 diff/git 命令解析', () => {
     expect(parseInput('/changes')).toEqual({ kind: 'changes' });
     expect(parseInput('/diff')).toEqual({ kind: 'diff', path: undefined });
@@ -90,8 +96,24 @@ describe('parseInput —— 内置命令解析', () => {
     expect(parseInput('/plan something')).toEqual({ kind: 'plan', sub: undefined });
   });
 
-  // 防漂移：HELP_TEXT 必须包含 /plan（命令与帮助文案不脱节）
-  it('HELP_TEXT 含 /plan', () => {
+  it('/skills 列目录；/skills <name> 看正文；大小写不敏感（Phase-11）', () => {
+    expect(parseInput('/skills')).toEqual({ kind: 'skills', name: undefined });
+    expect(parseInput('/skills commit-message')).toEqual({
+      kind: 'skills',
+      name: 'commit-message',
+    });
+    expect(parseInput('/SKILLS')).toEqual({ kind: 'skills', name: undefined });
+    expect(parseInput('/skills   code-review  ')).toEqual({
+      kind: 'skills',
+      name: 'code-review',
+    });
+  });
+
+  // 防漂移：HELP_TEXT 必须包含主流约定命令（命令与帮助文案不脱节）
+  it('HELP_TEXT 含 /plan /rewind /resume /skills', () => {
     expect(HELP_TEXT).toContain('/plan');
+    expect(HELP_TEXT).toContain('/rewind');
+    expect(HELP_TEXT).toContain('/resume');
+    expect(HELP_TEXT).toContain('/skills');
   });
 });

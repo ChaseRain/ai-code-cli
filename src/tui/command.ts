@@ -15,11 +15,13 @@ export type ParsedInput =
   | { kind: 'memory' } // /memory 查看记忆状态
   | { kind: 'checkpoint'; label?: string }
   | { kind: 'checkpoints' }
+  | { kind: 'rewind'; id?: string } // /rewind 打开快照选择器回滚；/rewind <id> 直接回滚
   | { kind: 'restore'; id?: string }
   | { kind: 'changes' }
   | { kind: 'diff'; path?: string }
   | { kind: 'undo-last' }
   | { kind: 'plan'; sub?: 'clear' } // /plan 查看；/plan clear 清空
+  | { kind: 'skills'; name?: string } // /skills 列目录；/skills <name> 看正文
   | { kind: 'unknown'; name: string }; // 未知 / 命令
 
 /**
@@ -61,6 +63,8 @@ export function parseInput(raw: string): ParsedInput {
       return { kind: 'checkpoint', label: arg.length ? arg : undefined };
     case 'checkpoints':
       return { kind: 'checkpoints' };
+    case 'rewind':
+      return { kind: 'rewind', id: arg.length ? arg : undefined };
     case 'restore':
       return { kind: 'restore', id: arg.length ? arg : undefined };
     case 'changes':
@@ -71,6 +75,8 @@ export function parseInput(raw: string): ParsedInput {
       return { kind: 'undo-last' };
     case 'plan':
       return { kind: 'plan', sub: arg.toLowerCase() === 'clear' ? 'clear' : undefined };
+    case 'skills':
+      return { kind: 'skills', name: arg.length ? arg : undefined };
     default:
       return { kind: 'unknown', name };
   }
@@ -87,14 +93,17 @@ export const HELP_TEXT = [
   '  /resume        打开会话选择器恢复（/resume <path> 直接恢复指定日志）',
   '  /sessions      打开会话选择器（/resume 的别名）',
   '  /memory        查看记忆状态（消息数 / 是否含摘要 / 当前日志）',
+  '  /rewind        打开快照选择器回滚（↑/↓ 选 · Enter 确认 · Esc 取消）',
+  '  /rewind <id>   直接回滚到指定 checkpoint',
   '  /checkpoint    创建本地可恢复快照（可加 label）',
   '  /checkpoints   列出本地 checkpoint',
-  '  /restore <id>  确认后恢复指定 checkpoint',
+  '  /restore <id>  同 /rewind <id>，确认后恢复指定 checkpoint',
   '  /changes       查看 Git/工作区变更概览',
   '  /diff [path]   查看全部或指定路径 diff',
   '  /undo-last     确认后恢复最近一次自动 checkpoint',
   '  /plan          查看当前任务计划',
   '  /plan clear    清空当前任务计划',
+  '  /skills        列出可用技能（/skills <name> 查看某技能完整说明）',
   '  /exit, /quit   退出',
   '',
   '直接输入文字即可作为任务下达给 Agent。',

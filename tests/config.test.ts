@@ -80,7 +80,41 @@ describe('loadConfig — 默认值回落', () => {
         keepRecentTokens: 8000,
         summarizer: 'heuristic',
       },
+      // Phase-11：技能系统配置默认值。
+      skills: {
+        enabled: true,
+      },
     });
+  });
+});
+
+describe('技能配置 skills（Phase-11）', () => {
+  it('缺省回落技能默认值（enabled=true）', () => {
+    const { config } = load();
+    expect(config.skills).toEqual({ enabled: true });
+  });
+
+  it('项目级覆盖用户级：skills.enabled', () => {
+    writeUserConfig({ skills: { enabled: true } });
+    writeProjectConfig({ skills: { enabled: false } });
+    const { config } = load();
+    expect(config.skills.enabled).toBe(false);
+  });
+
+  it('用户级关闭、项目级未写 → 保留用户级（深合并）', () => {
+    writeUserConfig({ skills: { enabled: false } });
+    const { config } = load();
+    expect(config.skills.enabled).toBe(false);
+  });
+
+  it('skills.enabled 类型错误被拒绝', () => {
+    writeProjectConfig({ skills: { enabled: 'yes' } });
+    expect(() => load()).toThrowError(/skills\.enabled|校验失败/i);
+  });
+
+  it('skills 未知子字段被拒绝（strict）', () => {
+    writeProjectConfig({ skills: { unknown: 1 } });
+    expect(() => load()).toThrowError(/校验失败|Unrecognized|unknown/i);
   });
 });
 

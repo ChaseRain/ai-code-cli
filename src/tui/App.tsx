@@ -24,7 +24,9 @@ import {
 } from '../session/index.js';
 import type { Session, SessionSummary } from '../session/index.js';
 import { CheckpointStore } from '../checkpoint/index.js';
+import type { CheckpointManifest } from '../checkpoint/index.js';
 import { PlanStore } from '../plan/index.js';
+import type { SkillRegistry } from '../skills/index.js';
 import type { ViewMessage } from './messages.js';
 import { summarizeArgs } from './messages.js';
 import { parseInput } from './command.js';
@@ -49,6 +51,8 @@ export interface AppProps {
   memoryCompaction?: MemoryCompactionOptions;
   /** 与 update_plan 工具共享的同一个 PlanStore（由 cli 注入）。 */
   planStore?: PlanStore;
+  /** 技能注册表（Phase-11）：供 /skills。undefined=skills 已禁用。 */
+  skills?: SkillRegistry;
 }
 
 /** 一次待用户决策的权限请求（弹窗用）。 */
@@ -57,6 +61,15 @@ interface PendingPermission {
   args: unknown;
   resolve: (d: 'allow' | 'deny' | 'always') => void;
 }
+
+/**
+ * 列表选择器状态（判别联合）：
+ * - session：/resume、/sessions —— Enter 恢复会话日志。
+ * - checkpoint：/rewind —— Enter 进入回滚确认（y/n）。
+ */
+type PickerState =
+  | { mode: 'session'; items: SessionSummary[]; index: number }
+  | { mode: 'checkpoint'; items: CheckpointManifest[]; index: number };
 
 // ============================================================================
 // 根组件
@@ -76,8 +89,8 @@ export function App(props: AppProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingPermission | null>(null);
   const [pendingRestore, setPendingRestore] = useState<string | null>(null);
-  // /sessions 交互选择器：null=未打开；否则保存候选列表与高亮下标。
-  const [picker, setPicker] = useState<{ items: SessionSummary[]; index: number } | null>(null);
+  // 交互选择器：null=未打开。/resume·/sessions 选会话，/rewind 选快照。
+  const [picker, setPicker] = useState<PickerState | null>(null);
 
   const checkpointStore = useMemo(
     () => props.checkpointStore ?? new CheckpointStore(session.rootDir),
@@ -125,6 +138,7 @@ export function App(props: AppProps): React.JSX.Element {
         }),
         memory: props.memoryCompaction ? memoryCompaction : undefined,
         summarizerLabel,
+        skills: props.skills,
       }),
     [
       session,
@@ -136,6 +150,7 @@ export function App(props: AppProps): React.JSX.Element {
       props.memoryCompaction,
       memoryCompaction,
       summarizerLabel,
+      props.skills,
     ],
   );
 
@@ -321,7 +336,10 @@ export function App(props: AppProps): React.JSX.Element {
           setModel(eff.id);
           return;
         case 'open-session-picker':
-          setPicker({ items: eff.items, index: eff.index });
+          setPicker({ mode: 'session', items: eff.items, index: eff.index });
+          return;
+        case 'open-checkpoint-picker':
+          setPicker({ mode: 'checkpoint', items: eff.items, index: eff.index });
           return;
         case 'resume':
           resumeFromTarget(eff.target);
@@ -384,7 +402,7 @@ export function App(props: AppProps): React.JSX.Element {
       return;
     }
 
-    // /sessions 选择器：↑/↓（或 Ctrl-P/N）移动、Enter 恢复、Esc 取消。
+    // 列表选择器：↑/↓（或 Ctrl-P/N）移动、Enter 选定、Esc 取消。
     if (picker) {
       const n = picker.items.length;
       if (key.upArrow || (key.ctrl && inputChar === 'p')) {
@@ -392,12 +410,19 @@ export function App(props: AppProps): React.JSX.Element {
       } else if (key.downArrow || (key.ctrl && inputChar === 'n')) {
         setPicker((s) => (s ? { ...s, index: (s.index + 1) % n } : s));
       } else if (key.return) {
-        const sel = picker.items[picker.index];
         setPicker(null);
-        if (sel) resumeFromTarget(sel.logPath);
+        // 会话：直接恢复日志；快照：进入回滚确认（y/n，复用 pendingRestore 流程）。
+        if (picker.mode === 'session') {
+          const sel = picker.items[picker.index];
+          if (sel) resumeFromTarget(sel.logPath);
+        } else {
+          const sel = picker.items[picker.index];
+          if (sel) setPendingRestore(sel.id);
+        }
       } else if (key.escape) {
+        const what = picker.mode === 'session' ? '会话选择' : '回滚选择';
         setPicker(null);
-        push({ kind: 'system', text: '已取消会话选择。' });
+        push({ kind: 'system', text: `已取消${what}。` });
       }
       return;
     }
@@ -434,7 +459,7 @@ export function App(props: AppProps): React.JSX.Element {
       ) : pending ? (
         <PermissionPrompt tool={pending.tool.name} args={pending.args} />
       ) : picker ? (
-        <SessionPicker items={picker.items} index={picker.index} />
+        <PickerView title={pickerTitle(picker)} lines={pickerLines(picker)} index={picker.index} />
       ) : (
         <Box>
           <Text color="cyan">{busy ? '… ' : '› '}</Text>
@@ -565,41 +590,63 @@ export function RestorePrompt({ id }: { id: string }): React.JSX.Element {
   );
 }
 
-/** /sessions 交互选择器：高亮当前项，支持窗口滚动（最多展示 VISIBLE 行）。 */
-export function SessionPicker({
-  items,
+/** 选择器标题（含操作提示），随模式而变。 */
+export function pickerTitle(p: PickerState): string {
+  return p.mode === 'session'
+    ? '选择会话恢复（↑/↓ 移动 · Enter 恢复 · Esc 取消）'
+    : '选择快照回滚（↑/↓ 移动 · Enter 确认 · Esc 取消）';
+}
+
+/** 把选择器条目格式化为展示行（每条一行）。 */
+export function pickerLines(p: PickerState): string[] {
+  return p.mode === 'session'
+    ? p.items.map(
+        (s) =>
+          `${s.current ? '*' : ' '} ${s.title} · ${s.messages} msg · ${s.toolCalls} tools · ${s.updatedAt}`,
+      )
+    : p.items.map(
+        (c) =>
+          `${c.trigger === 'auto' ? '~' : '·'} ${c.label ?? '(无标签)'} · ${c.files.length} files · ${c.createdAt}`,
+      );
+}
+
+/** 通用列表选择器视图：高亮当前项，窗口滚动（最多展示 VISIBLE 行）。 */
+export function PickerView({
+  title,
+  lines,
   index,
 }: {
-  items: SessionSummary[];
+  title: string;
+  lines: string[];
   index: number;
 }): React.JSX.Element {
   const VISIBLE = 10;
   // 让高亮项尽量居中，并夹紧到列表边界。
   let start = Math.max(0, index - Math.floor(VISIBLE / 2));
-  start = Math.min(start, Math.max(0, items.length - VISIBLE));
-  const window = items.slice(start, start + VISIBLE);
+  start = Math.min(start, Math.max(0, lines.length - VISIBLE));
+  const window = lines.slice(start, start + VISIBLE);
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
       <Text color="cyan" bold>
-        选择会话恢复（↑/↓ 移动 · Enter 恢复 · Esc 取消）{'  '}
+        {title}{'  '}
         <Text color="gray">
-          {index + 1}/{items.length}
+          {index + 1}/{lines.length}
         </Text>
       </Text>
       {start > 0 && <Text color="gray">  ↑ 上面还有 {start} 条</Text>}
-      {window.map((s, i) => {
+      {window.map((line, i) => {
         const real = start + i;
         const selected = real === index;
         return (
-          <Text key={s.id} color={selected ? 'cyan' : undefined} inverse={selected}>
+          <Text key={real} color={selected ? 'cyan' : undefined} inverse={selected}>
             {selected ? '❯ ' : '  '}
-            {s.current ? '*' : ' '} {s.title} · {s.messages} msg · {s.toolCalls} tools · {s.updatedAt}
+            {line}
           </Text>
         );
       })}
-      {start + VISIBLE < items.length && (
-        <Text color="gray">  ↓ 下面还有 {items.length - start - VISIBLE} 条</Text>
+      {start + VISIBLE < lines.length && (
+        <Text color="gray">  ↓ 下面还有 {lines.length - start - VISIBLE} 条</Text>
       )}
     </Box>
   );

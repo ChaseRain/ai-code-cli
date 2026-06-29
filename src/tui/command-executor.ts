@@ -17,12 +17,13 @@
 import type { ParsedInput } from './command.js';
 import { HELP_TEXT } from './command.js';
 import type { MemoryCompactionOptions } from '../agent/index.js';
-import type { CheckpointStore } from '../checkpoint/index.js';
+import type { CheckpointManifest, CheckpointStore } from '../checkpoint/index.js';
 import type { PlanStore } from '../plan/index.js';
 import { formatPlanSnapshot } from '../plan/index.js';
 import type { Session } from '../session/index.js';
 import { listSessions, resolveSessionLog } from '../session/index.js';
 import type { SessionSummary } from '../session/index.js';
+import type { SkillRegistry } from '../skills/index.js';
 import {
   findLatestAutoCheckpoint,
   formatDiffResult,
@@ -56,6 +57,11 @@ export interface CommandDeps {
    */
   memory?: MemoryCompactionOptions;
   summarizerLabel: string;
+  /**
+   * 技能注册表（Phase-11）：供 /skills 列目录 / 看正文。
+   * undefined 表示 skills 已禁用（config.skills.enabled=false）→ /skills 给出「已禁用」提示。
+   */
+  skills?: SkillRegistry;
   // 以下为可注入的查询函数（默认用真实实现，测试可注入 fake）。
   listSessions?: typeof listSessions;
   getWorkspaceStatus?: typeof getWorkspaceStatus;
@@ -76,6 +82,7 @@ export type CommandEffect =
   | { type: 'clear-session' } // session.clear + permission.reset + 重置 turn
   | { type: 'set-model'; id: string }
   | { type: 'open-session-picker'; items: SessionSummary[]; index: number }
+  | { type: 'open-checkpoint-picker'; items: CheckpointManifest[]; index: number }
   | { type: 'resume'; target: string } // 已解析好的日志目标
   | { type: 'confirm-restore'; id: string } // /restore /undo-last → 进入确认态
   | { type: 'run-task'; text: string } // 非命令：落到 Agent
@@ -116,6 +123,7 @@ export function createCommandExecutor(deps: CommandDeps): CommandExecutor {
     status,
     memory,
     summarizerLabel,
+    skills,
   } = deps;
   // 查询函数默认用真实实现，测试可覆盖。
   const _listSessions = deps.listSessions ?? listSessions;
@@ -260,6 +268,35 @@ export function createCommandExecutor(deps: CommandDeps): CommandExecutor {
         }
       }
 
+      // ── rewind：主流约定（如 Claude Code）的回滚入口。无参打开快照选择器；
+      //    带 id 直接进入确认态（与 /restore <id> 等价）。────────────────────
+      case 'rewind': {
+        if (parsed.id) {
+          return {
+            echoUser: true,
+            messages: [sys(`确认回滚到 checkpoint ${parsed.id}？按 y 确认，n/Esc 取消。`)],
+            effect: { type: 'confirm-restore', id: parsed.id },
+          };
+        }
+        try {
+          const items = await checkpointStore.list({ limit: CHECKPOINTS_LIMIT });
+          if (items.length === 0) {
+            return { echoUser: true, messages: [sys('暂无可回滚的 checkpoint。')], effect: NONE };
+          }
+          return {
+            echoUser: true,
+            messages: [],
+            effect: { type: 'open-checkpoint-picker', items, index: 0 },
+          };
+        } catch (e) {
+          return {
+            echoUser: true,
+            messages: [err(`checkpoint 列表读取失败：${msg(e)}`)],
+            effect: NONE,
+          };
+        }
+      }
+
       // ── restore：缺 id 报错；有 id 进入确认态 ────────────────────────────
       case 'restore': {
         if (!parsed.id) {
@@ -350,6 +387,45 @@ export function createCommandExecutor(deps: CommandDeps): CommandExecutor {
         return {
           echoUser: true,
           messages: [sys(formatPlanSnapshot(planStore.current()))],
+          effect: NONE,
+        };
+      }
+
+      // ── skills：列目录 / 看正文（Phase-11，纯展示无副作用）──────────────────
+      case 'skills': {
+        if (!skills) {
+          return {
+            echoUser: true,
+            messages: [sys('技能功能已禁用（config.skills.enabled=false）。')],
+            effect: NONE,
+          };
+        }
+        if (!parsed.name) {
+          const list = skills.list();
+          if (list.length === 0) {
+            return {
+              echoUser: true,
+              messages: [
+                sys(
+                  '暂无可用技能。把 SKILL.md 放进 ~/.config/ai-code-cli/skills/<name>/ 或 <项目>/.ai-code-cli/skills/<name>/ 即可。',
+                ),
+              ],
+              effect: NONE,
+            };
+          }
+          const lines = list.map(
+            (s) => `${s.name} — ${s.description || '（无描述）'}  [${s.source}]`,
+          );
+          return {
+            echoUser: true,
+            messages: [sys(['可用技能：', ...lines].join('\n'))],
+            effect: NONE,
+          };
+        }
+        const res = skills.load(parsed.name);
+        return {
+          echoUser: true,
+          messages: [res.ok ? sys(res.content) : err(res.error)],
           effect: NONE,
         };
       }

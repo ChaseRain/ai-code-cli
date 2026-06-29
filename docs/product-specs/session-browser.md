@@ -1,7 +1,8 @@
 # Product Spec — Session Browser
 
-> 状态：implemented（M7 已实现并测试；Phase-6 容量硬化中） · 最后更新：2026-06-28
-> 模块：`src/session/browser.ts`、`src/tui/command.ts`、`src/tui/App.tsx`。
+> 状态：implemented（M7 已实现并测试；Phase-6 容量硬化中） · 最后更新：2026-06-29
+> 模块：`src/session/browser.ts`、`src/tui/command.ts`、`src/tui/command-executor.ts`、`src/tui/App.tsx`。
+> **主流约定对齐**：`/resume` 无参打开**交互式会话选择器**（↑/↓ 移动 · Enter 恢复 · Esc 取消，对齐 Claude Code）；`/sessions` 为其别名；`/resume <id|latest|path>` 仍直接恢复指定日志。选择器复用 TUI 列表选择器（`PickerState`/`PickerView`，见 [`tui.md`](tui.md)）。
 > **Phase-6 硬化**（见 [`load-hardening.md`](load-hardening.md)）：`listSessions(root, cur, {limit})` 先按文件名时间序选候选再读取，`/sessions` 默认 50（LH3）；`summarizeLog` 先 stat、超 2MiB 不全量读（warning）、`/resume` 超 8MiB 明确报错、`resolveSessionLog` 走文件名快速路径不全量 summarize（LH7）。
 
 ## 职责
@@ -21,11 +22,14 @@ Session Browser 从 `.ai_history/logs/*.jsonl` 读取历史会话摘要，让用
 
 | 命令 | 行为 | 输出字段 |
 |---|---|---|
-| `/sessions` | 列出本地会话摘要，默认按最近更新时间倒序 | id、startedAt、updatedAt、title、messages、toolCalls、logPath、current |
-| `/resume latest` | 恢复最新非当前日志 | restoredLog、messagesRestored、systemCountHidden |
-| `/resume <id>` | 恢复指定会话 | restoredLog、messagesRestored、systemCountHidden |
+| `/resume` | 无参打开交互式会话选择器（最近 50，按更新时间倒序，默认高亮当前会话）；Enter 恢复选定会话 | 选择器条目：current 标记、title、messages、toolCalls、updatedAt |
+| `/sessions` | `/resume` 无参的别名，同样打开选择器 | 同上 |
+| `/resume latest` | 直接恢复最新非当前日志 | restoredLog、messagesRestored、systemCountHidden |
+| `/resume <id>` | 直接恢复指定会话（未知 id 报错） | restoredLog、messagesRestored、systemCountHidden |
 
-`/resume` 无参数继续保持 Round-2 行为：恢复最近一次可用会话。
+> 行为变更：`/resume` 无参不再「直接恢复最近一次」，而是打开选择器交给用户选（主流约定）。
+> 「直接恢复最近一次」用 `/resume latest`。`listSessions(root, cur, {limit:50})` 与 `resolveSessionLog`
+> 的读侧能力不变，仅 TUI 入口的交互形态变化。
 
 ## 数据结构
 
@@ -46,10 +50,10 @@ interface SessionSummary {
 
 ## 行为流程
 
-1. `/sessions` 扫描 `.ai_history/logs/*.jsonl`。
+1. `/resume`(无参) 或 `/sessions` 扫描 `.ai_history/logs/*.jsonl`（最近 50）。
 2. 对每个 jsonl 做容错解析：坏行跳过并计入 warning，不阻断列表。
 3. 生成摘要：时间、首条用户意图、消息数、tool_call 次数、当前日志标记。
-4. `/resume <id|latest>` 解析目标日志，调用 `Session.resumeFrom(logPath)`。
+4. 执行器返回 `open-session-picker`，`App` 打开选择器；用户 ↑/↓ 选定后 Enter，对该条 `logPath` 调用 `Session.resumeFrom(logPath)`（`/resume <id|latest|path>` 则跳过选择器直接解析目标日志）。
 5. 恢复后 TUI 输出短摘要，不 dump system prompt，不展开工具原始结果。
 
 ## 验收测试

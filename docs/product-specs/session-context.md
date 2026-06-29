@@ -33,7 +33,7 @@ interface ToolCall { id: string; name: string; args: unknown; }
 ## 会话恢复（resume，R2 已实现）
 - `Session.resumeFrom(logPath)`：读取 jsonl，重建内存 `Message[]`——`tool_call` 记录挂回前一条 assistant 的 `toolCalls`，`tool_result` 还原为 tool 消息，`permission`/`error` 跳过（不进喂模型上下文）。保持顺序与 tool 配对。
   - `summary` 记录：用 `payload.replaced` 把前导 system 后的旧消息段替换为 `SUMMARY_PREFIX + summary` 的 system 消息，**恢复压缩后的状态、不丢摘要**。
-- `Session.findLatestLog(rootDir, exclude?)`：返回最近一次会话日志路径（按文件名时间戳），供 `/resume` 默认目标。
+- `Session.findLatestLog(rootDir, exclude?)`：返回最近一次会话日志路径（按文件名时间戳），供 `/resume latest` 解析目标。
 - 恢复后新消息写入**当前（新）日志文件**，不污染被恢复的旧日志。
 
 ## 验收（测试）

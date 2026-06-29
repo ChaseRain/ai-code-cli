@@ -1,7 +1,8 @@
 # Product Spec — Checkpoint / Restore
 
-> 状态：implemented（M6 已实现并测试；Phase-6 稳定性硬化中） · 最后更新：2026-06-28
-> 模块：`src/checkpoint/`、`src/tui/command.ts`、`src/tui/App.tsx`、Agent Loop 写类工具前置钩子。
+> 状态：implemented（M6 已实现并测试；Phase-6 稳定性硬化中） · 最后更新：2026-06-29
+> 模块：`src/checkpoint/`、`src/tui/command.ts`、`src/tui/command-executor.ts`、`src/tui/App.tsx`、Agent Loop 写类工具前置钩子。
+> **`/rewind`（主流回滚约定）**：交互式快照选择器入口，复用 TUI 列表选择器；`/restore <id>` 作为等价别名保留。
 > **Phase-6 硬化**（见 [`load-hardening.md`](load-hardening.md)）：id 用 `randomUUID` + 原子目录占位（LH1）；资源预算（单文件/总量/最大文件数，超限写入 `excluded` 带原因，LH4）；`list({limit})` 按目录名倒序逐个读 manifest、凑满 limit 个**有效**项即停（坏目录跳过且不挤占结果数量）、`/checkpoints` 默认 50（LH6）。
 
 ## 职责
@@ -21,9 +22,12 @@ Checkpoint 提供本地可回退快照，用于写文件、编辑文件、执行
 
 | 命令 | 行为 | 输出字段 |
 |---|---|---|
+| `/rewind` | **主流约定的回滚入口**：无参打开快照选择器（↑/↓ 移动 · Enter 进入确认 · Esc 取消），最近 50；`/rewind <id>` 直接进入指定 checkpoint 的回滚确认 | 选择器条目同 `/checkpoints`；确认后同 `/restore` |
 | `/checkpoint [label]` | 手动创建 checkpoint | id、label、createdAt、filesCount、excludedCount |
-| `/checkpoints` | 按时间倒序列出 checkpoint | id、label、createdAt、trigger、filesCount、gitHead |
-| `/restore <id>` | 恢复指定 checkpoint，执行前必须确认 | restore id、filesRestored、filesSkipped、preRestoreCheckpoint |
+| `/checkpoints` | 按时间倒序列出 checkpoint（纯文本列表，不交互） | id、label、createdAt、trigger、filesCount、gitHead |
+| `/restore <id>` | 恢复指定 checkpoint，执行前必须确认（等价 `/rewind <id>`） | restore id、filesRestored、filesSkipped、preRestoreCheckpoint |
+
+> `/rewind` 复用 TUI 的列表选择器（判别联合 `PickerState`，与 `/resume`/`/sessions` 同一套 ↑/↓/Enter/Esc 键盘逻辑与 `PickerView` 渲染，见 [`tui.md`](tui.md)）：选定快照后进入 `confirm-restore` 确认态（y 确认 / n·Esc 取消），确认后执行 `CheckpointStore.restore`。执行器对 `/rewind` 无参返回 `open-checkpoint-picker` 副作用、带 id 返回 `confirm-restore`。
 
 写类工具自动触发 checkpoint：
 - `write_file`、`edit_file` 执行前必须创建 `trigger=auto` 的 checkpoint。
@@ -86,7 +90,7 @@ interface CheckpointManifest {
 
 ## 权限与安全
 
-- `/restore <id>` 是破坏性操作，必须走确认。
+- `/restore <id>`、`/rewind`（选定快照后）、`/undo-last` 都是破坏性操作，必须走确认。
 - 不得恢复 project root 外路径。
 - 不得快照 `.env` 和密钥内容。
 - checkpoint manifest 只能记录脱敏摘要，不记录 secret 原文。
@@ -99,7 +103,8 @@ interface CheckpointManifest {
 | C2 | restore | 修改文件后 restore 可恢复 manifest 内文件 |
 | C3 | 排除项 | `.git/node_modules/dist/.env/.ai_history/checkpoints` 不入快照 |
 | C4 | 路径越界 | root 外路径创建或恢复被拒绝 |
-| C5 | restore 确认 | 未确认不执行恢复 |
+| C5 | restore 确认 | 未确认不执行恢复（`/restore`/`/rewind`/`/undo-last` 同走 `confirm-restore`） |
+| C8 | `/rewind` 选择器 | 无参列举 checkpoint 返回 `open-checkpoint-picker`（空列表则提示）；`/rewind <id>` 返回 `confirm-restore` |
 | C6 | 自动 checkpoint | 写类工具执行前创建 `trigger=auto` |
 | C7 | session event | checkpoint/restore 事件写入 jsonl，且不喂 secret |
 

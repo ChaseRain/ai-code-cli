@@ -1,6 +1,6 @@
 # Exec Plan: Phase 10 — 评审 Loop Round-2（工程质量自洽 + 工具系统补全）
 
-> 状态：implemented（代码 + 测试已落地，291/291 通过，build exit 0） · 最后更新：2026-06-29
+> 状态：implemented（代码 + 测试已落地，296/296 通过，build exit 0） · 最后更新：2026-06-29
 > 承接 Phase-9：`npm run build && npm test` = 243/243、build exit 0、真实 API 冒烟跑通。
 > 纪律：**docs-first**。本计划 + 受影响 spec 评审通过后再进入代码阶段。当前分支，`src/cli.tsx` 仍只做 composition root。
 
@@ -20,7 +20,12 @@ Round-1 已补齐基线可靠性（P1/P2/P3）与头号加分（记忆增强 M1-
 - [x] **Q1** 抽 `src/tui/command-executor.ts`：纯逻辑 `CommandExecutor`（接收 ParsedInput + 注入 deps，返回结构化 `CommandOutcome`：echoUser/messages/effect），App.tsx 的 `submit` 只负责调用它 + 据结果 push 消息 / 触发副作用；命令 I/O（checkpoint/session.resume/workspace 查询/plan/memory 格式化/sessions 列举）集中到执行器，与 React 渲染解耦；App 从 ~746 行瘦身，删去内嵌 switch 与重复格式化函数。新增 `tests/command-executor.test.ts`（30 用例）覆盖各命令执行路径，IO 失败收敛为 error（不抛）。
 - [x] **T1** 新增 `delete-file.ts`、`move-file.ts`（readOnly=false，经路径沙箱 realpath 守护、越界/不存在/目录非空/目标已存在边界），注册进 `builtinTools`（文件/Shell 工具 7→9，敏感 3→5），权限确认流程自动复用。新增工具测试（delete/move 各路径 + 越界拒绝）。
 - [x] **T2** 新增 `validate-args.ts` 轻量统一校验（必填存在 + 基本类型 string/number/boolean），落在各工具入口（read/write/edit/delete/move），错误即数据返回清晰 ok:false（`<tool> 参数无效：<字段> 缺失/类型应为 <type>`）。补 malformed-args 测试（缺必填/类型错 → ok:false 且不执行副作用、不抛）。
-- [x] **回归**：`npm run build` exit 0；`npm test` 全绿 **291/291**（基线 243 + 新增 48：command-executor 30 + tools delete/move/malformed 18）；TUI 渲染冒烟（tui-render）行为不变。
+- [x] **U1 主流交互约定落地（Round-2 追加）**：把会话/快照恢复对齐主流 code agent（如 Claude Code）的交互形态。
+  - `/resume` 无参由「直接恢复最近」改为**打开交互式会话选择器**（↑/↓ 移动 · Enter 恢复 · Esc 取消，默认高亮当前会话）；`/sessions` 为其别名；`/resume <id|latest|path>` 仍直接恢复（见 session-browser.md）。
+  - 新增 `/rewind`（**checkpoint 回滚的主流命令**）：无参打开**快照选择器**、选定后进入 `confirm-restore`（y/n）；`/rewind <id>` 直接进入确认（等价 `/restore <id>`，见 checkpoint.md）。
+  - 执行器新增 `open-checkpoint-picker` 副作用；`App` 用判别联合 `PickerState{mode:'session'|'checkpoint'}` 承载两类选择器，共用一套 ↑/↓/Enter/Esc 键盘逻辑与窗口滚动的 `PickerView` 渲染（会话 Enter→恢复日志；快照 Enter→回滚确认）。
+  - 测试：`tests/tui-command.test.ts`（`/rewind` 解析 + HELP_TEXT 防漂移含 `/rewind` `/resume`）、`tests/command-executor.test.ts`（`/rewind` 空/有数据/带 id/列举失败 4 态、`/resume` 无参 open-session-picker）。
+- [x] **回归**：`npm run build` exit 0；`npm test` 全绿 **296/296**（基线 243 + Q1/T1/T2 48 + U1 5：command-executor `/rewind` 4 + command 解析/HELP 1）；TUI 渲染冒烟（tui-render）行为不变。
 
 ## 不做（本轮）
 - 投机性 future-proofing（version 字段、快照迁移、baseURL 脱敏、ripgrep/PCRE、可折叠 TUI、↑↓ 历史检索）——与 less is more 冲突或明确「不做（首期）」。

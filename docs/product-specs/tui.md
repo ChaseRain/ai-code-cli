@@ -27,13 +27,15 @@ assistant 文本随 SSE 增量刷新（消费 `provider` 经 `loop` 转发的 UI
 | `/resume` | 打开会话选择器恢复（无参，主流约定）；`/resume <path>` 直接恢复指定 jsonl 日志（见 memory.md） |
 | `/sessions` | 打开会话选择器（`/resume` 无参的别名，最近 50，见 session-browser.md） |
 | `/memory` | 查看记忆状态（消息数 / 是否含摘要 / 当前日志） |
+| `/rewind` | 打开快照选择器回滚（无参，主流约定）；`/rewind <id>` 直接进入指定 checkpoint 的回滚确认（见 checkpoint.md） |
 | `/checkpoint [label]` | 创建本地可恢复快照（见 checkpoint.md） |
 | `/checkpoints` | 列出本地 checkpoint（最近 50） |
-| `/restore <id>` | 确认后恢复指定 checkpoint |
+| `/restore <id>` | 确认后恢复指定 checkpoint（等价 `/rewind <id>`） |
 | `/changes` | 查看 Git / 工作区变更概览（见 diff-git.md） |
 | `/diff [path]` | 查看全部或指定路径 diff |
 | `/undo-last` | 确认后恢复最近一次自动 checkpoint |
 | `/plan` / `/plan clear` | 查看 / 清空当前任务计划（见 task-plan.md） |
+| `/skills` / `/skills <name>` | 列出可用技能 / 查看某技能正文（见 skills.md） |
 | `/exit`（`/quit`） | 退出程序 |
 
 ## 内置命令执行器（CommandExecutor，Phase-10 Q1）
@@ -65,6 +67,7 @@ interface CommandDeps {
   getWorkspaceDiff: typeof getWorkspaceDiff;
   findLatestAutoCheckpoint: typeof findLatestAutoCheckpoint;
   memory?: MemoryCompaction;      // /memory 展示生效配置
+  skills?: SkillRegistry;         // /skills 列目录 / 看正文（Phase-11，关闭或无技能时缺省）
   status: { model; baseURL; maxTurns; turn; apiKeyConfigured }; // /status /model 上下文
 }
 
@@ -77,8 +80,9 @@ type CommandEffect =
   | { type: 'clear-session' }                       // session.clear + permission.reset + 重置 turn
   | { type: 'set-model'; id: string }
   | { type: 'open-session-picker'; items: SessionSummary[]; index: number }
+  | { type: 'open-checkpoint-picker'; items: CheckpointManifest[]; index: number } // /rewind 无参
   | { type: 'resume'; target: string }              // 已解析好的日志目标
-  | { type: 'confirm-restore'; id: string; prompt: string } // /restore /undo-last → 进入确认态
+  | { type: 'confirm-restore'; id: string; prompt: string } // /restore /undo-last /rewind <id> → 进入确认态
   | { type: 'run-task'; text: string }              // 非命令：落到 Agent
   | { type: 'exit' };
 
@@ -97,20 +101,22 @@ export function createCommandExecutor(deps: CommandDeps): CommandExecutor;
 
 ### 取舍说明
 - **纯异步函数 + 注入 deps**：`run` 返回 `CommandOutcome` 数据，不接触 React 状态；测试只需断言 `messages`/`effect`，无需渲染。
-- **副作用以「描述」返回而非执行**：`/restore` `/undo-last` 返回 `confirm-restore` 让 `App` 进入确认态（确认后的 `checkpointStore.restore` 仍在 `App` 的 `confirmRestore` 里，因为它依赖弹窗按键流）；`/sessions` 返回 `open-session-picker` 让 `App` 持有 picker state。执行器只负责「算出该做什么 + 查好数据」。
+- **副作用以「描述」返回而非执行**：`/restore` `/undo-last` `/rewind <id>` 返回 `confirm-restore` 让 `App` 进入确认态（确认后的 `checkpointStore.restore` 仍在 `App` 的 `confirmRestore` 里，因为它依赖弹窗按键流）；`/resume`(无参)`/sessions` 返回 `open-session-picker`、`/rewind`(无参) 返回 `open-checkpoint-picker` 让 `App` 持有 picker state（`App` 用判别联合 `PickerState{mode:'session'|'checkpoint'}` 承载，共用一套 ↑/↓/Enter/Esc 键盘逻辑与 `PickerView` 渲染：会话模式 Enter 恢复日志、快照模式 Enter 进入 y/n 回滚确认）。执行器只负责「算出该做什么 + 查好数据」。
 - **`exit`/`set-model`/`clear-session` 仍由 App 执行**：这些是 Ink/React 运行时能力（`exit()`、`setModel`、`setMessages`），执行器只发出意图。
 - 不引入 future-proofing（命令插件机制、撤销栈等，本轮不做）。
 
 ## 验收
-- 命令解析单测（`/model <id>` 带参、`/resume` `/sessions` `/memory`、`/checkpoint` `/checkpoints` `/restore`、`/changes` `/diff` `/undo-last`、`/plan` `/plan clear`；HELP_TEXT 含 `/plan` 防漂移）。
+- 命令解析单测（`/model <id>` 带参、`/resume` `/sessions` `/memory`、`/checkpoint` `/checkpoints` `/rewind` `/restore`、`/changes` `/diff` `/undo-last`、`/plan` `/plan clear`；HELP_TEXT 含 `/plan` 防漂移）。
 - **Ink render 冒烟测试**（tests/tui-render.test.ts，ink-testing-library）：渲染**真实生产组件**
   （`MessageList` / `PermissionPrompt` / `StatusBar`）+ **启动态完整 `<App>`**，断言
   ① 启动欢迎/状态栏（完整 App）；② 工具调用/结果行；③ 权限弹窗（“需要授权”+y/a/n）；④ 状态栏状态流。
   帧文本存 `deliverables/tui-frames/`。
 - **命令执行单测（Phase-10 Q1，tests/command-executor.test.ts）**：注入 fake deps，断言各命令的
   `CommandOutcome`——`/checkpoint` 创建后返回成功消息、`/checkpoints` 空/有数据两态、`/restore`
-  缺 id 报错 vs 有 id 返回 `confirm-restore`、`/resume` 无日志 vs 解析出 `resume` target、
-  `/sessions` 空 vs `open-session-picker`、`/changes` `/diff` 调 workspace 查询并格式化、
+  缺 id 报错 vs 有 id 返回 `confirm-restore`、`/resume`(无参)/`/sessions` 空 vs `open-session-picker`、
+  `/resume <path>` 解析出 `resume` target vs 无日志报错、
+  `/rewind`(无参) 空 vs `open-checkpoint-picker`、`/rewind <id>` 返回 `confirm-restore`、
+  `/changes` `/diff` 调 workspace 查询并格式化、
   `/undo-last` 无自动 checkpoint vs `confirm-restore`、`/plan` `/plan clear`、`/memory` 状态、
   IO 失败收敛为 `error` 消息（不抛）；`unknown`/`task` 分支正确。
 - 权限弹窗阻塞执行直到用户选择。

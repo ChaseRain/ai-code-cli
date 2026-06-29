@@ -1,7 +1,8 @@
 # Spec: 工具系统
 
 > 状态：implemented · 最后更新：2026-06-29 · 模块：`src/tools/`（tests/tools.test.ts 覆盖）
-> 工具集：**9 个文件/Shell 原子工具 + 1 个 harness 工具 `update_plan`**（Phase-10 新增 `delete_file`/`move_file`，见下）。
+> 工具集：**9 个文件/Shell 原子工具 + harness 工具 `update_plan`**（Phase-10 新增 `delete_file`/`move_file`，见下）。
+> Phase-11 新增 harness 工具 **`use_skill`**（仅当 cli 注入 `SkillRegistry` 时注册；文件/Shell 工具数不变 9，见下「use_skill 工具」）。
 
 ## 职责
 以结构化方式向模型暴露原子能力，统一输入/输出/错误；注册表负责把工具 schema 序列化给 Provider。
@@ -32,9 +33,11 @@ interface ToolContext { rootDir: string; signal: AbortSignal; }
 | `move_file` | ❌ | 移动 / 重命名文件或目录 | 需权限；源与目标均 realpath 守护；目标已存在报错（见下）|
 | `run_shell` | ❌ | 执行 Shell 命令 | 需权限；超时；捕获 stdout/stderr/exit |
 | `update_plan` | ✅ | **harness 工具**：维护任务计划（步骤+状态） | 只更新内存计划、不读写文件/不执行步骤；契约见 [`task-plan.md`](task-plan.md) |
+| `use_skill` | ✅ | **harness 工具（Phase-11）**：加载某技能 `SKILL.md` 正文（L2） | 只读本地已安装技能文件 → 自动执行；技能名单段防穿越、≤ `MAX_TOOL_FILE_BYTES`；契约见 [`skills.md`](skills.md) |
 
 > `update_plan` 由 `createDefaultRegistry(planStore)` 绑定到与 `/plan` 命令共享的 `PlanStore`；
 > 它是只读工具（无权限弹窗），不改变原 7 个文件/Shell 工具的权限语义。
+> `use_skill` 由 `createDefaultRegistry(planStore, skillRegistry?)` 在**传入 skillRegistry 时**绑定注册（省略则不注册，保持工具集确定）。
 
 ## 新增工具契约（Phase-10 T1）
 
@@ -61,6 +64,23 @@ interface ToolContext { rootDir: string; signal: AbortSignal; }
   - `to` **已存在** → `移动失败：目标 <to> 已存在（不覆盖，请先删除或换名）`（不静默覆盖）。
 - **边界**：源与目标**都**做沙箱守护（防把文件移出根 / 从根外移入）；目标已存在不覆盖；可移动文件或目录。
 
+## use_skill 工具契约（Phase-11，harness 工具）
+
+> 仿 `update_plan` 的「绑定依赖工厂」模式：`makeUseSkillTool(registry): Tool`（见 `src/tools/use-skill.ts`，待实现）。
+> 完整三级披露与安全边界见 [`skills.md`](skills.md)；此处只记工具侧契约。
+
+- **输入（schema）**：`{ name: string }`（必填）——要加载的技能名（单段标识）。经 `validate-args.ts` 统一校验（见下）。
+- **`readOnly: true`（关键决策，与既有只读工具一致）**：`use_skill` 只读取**本地已安装**的技能 `SKILL.md` 正文，
+  与 `read_file` 同信任级别 → **自动执行、不弹权限**。技能内若要跑脚本/改文件，由模型显式走 `run_shell` / `write_file`，
+  仍受既有权限确认约束——**权限边界不被 skills 旁路**，故不必把 `use_skill` 设为敏感工具。
+- **行为**：委托 `registry.load(name)`，返回技能正文（剥离 frontmatter）。成功 `{ ok:true, content: <正文> }`。
+- **错误返回（ok:false，均为数据不抛）**：
+  - 缺 `name` / 非字符串 → 形参校验失败（见下）。
+  - **技能名穿越**（含 `/`、`\`、`..`、绝对路径）→ 拒绝且不触磁盘。
+  - 未知技能 → `未知技能：<name>。可用：a, b, c`（带可用列表，便于模型自我纠正）。
+  - 正文超 `MAX_TOOL_FILE_BYTES` → 拒绝并提示（与 read_file 一致）。
+- **注册**：仅当 `createDefaultRegistry(planStore, skillRegistry?)` 收到 `skillRegistry` 时注册；否则工具集不含 `use_skill`（无技能/关闭开关时确定）。
+
 ## 形参校验约定（Phase-10 T2）
 
 > 现状偏差：各工具手工 `as XxxArgs` + 局部 `if (!path)`，缺统一的「必填存在 + 基本类型」轻量校验；
@@ -86,6 +106,7 @@ interface ToolContext { rootDir: string; signal: AbortSignal; }
 - `run_shell` 非零退出码被收敛为 `ok:false` 且含 stderr。
 - 工具结果能被 Loop 正确回传（见 agent-loop.md）。
 - `createDefaultRegistry` 含 `update_plan`；文件/Shell 工具扩为 9（readOnly 5：list_dir/read_file/glob/grep/update_plan；敏感 5：write_file/edit_file/delete_file/move_file/run_shell），原工具权限语义不退化；见 task-plan.md TP4/TP6。
+- **use_skill 注册（Phase-11）**：`createDefaultRegistry(planStore, skillRegistry)` 传入 registry 时工具集含 `use_skill`（readOnly）；不传时不含；**文件/Shell 工具数仍为 9**（use_skill 是 harness 工具，不计入文件/Shell 工具）。涉及工具计数的既有断言据此同步更新；契约见 [`skills.md`](skills.md)。
 - **delete_file / move_file（Phase-10 T1）**：删文件成功；删非空目录报错；删不存在报错；move 目标已存在不覆盖报错；源/目标越界（`..`/绝对/符号链接）均拒绝。
 - **形参校验（Phase-10 T2，malformed-args）**：缺必填字段、字段类型错误（如 `path` 传 number）→ `ok:false` 清晰错误且不执行副作用；不抛异常。
 - 测试覆盖：含 Phase-6 run_shell 输出截断（LH2）、Phase-7 路径/大小/进程树硬化、Phase-10 delete/move/malformed-args 等；当前整库回归 **291/291**（2026-06-29，详见 [`index.md`](index.md)）。

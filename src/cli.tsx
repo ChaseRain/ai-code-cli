@@ -18,8 +18,11 @@ import { Session, createSummarizer } from './session/index.js';
 import type { MemoryCompactionOptions } from './agent/index.js';
 import { CheckpointStore } from './checkpoint/index.js';
 import { PlanStore } from './plan/index.js';
+import { SkillRegistry } from './skills/index.js';
 import { App } from './tui/index.js';
-import { SYSTEM_PROMPT } from './core/system-prompt.js';
+import { SYSTEM_PROMPT, buildSystemPrompt } from './core/system-prompt.js';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 function main(): void {
   const cwd = process.cwd();
@@ -38,15 +41,31 @@ function main(): void {
 
   const { config, apiKey, apiKeyConfigured } = loaded;
 
+  // ── 技能系统（Phase-11）────────────────────────────────────────────────
+  // 两级目录（复用 config 路径约定）：用户级 ~/.config/ai-code-cli/skills、项目级 <cwd>/.ai-code-cli/skills。
+  // enabled 时 discover()（只读 frontmatter，L1）并把目录注入 system prompt、注册 use_skill 工具；
+  // 关闭时不发现、不注入、不注册（工具集回到无 skills 形态）。registry 始终传入 App 供 /skills 提示。
+  const skillsEnabled = config.skills.enabled;
+  const skillRegistry = new SkillRegistry({
+    userDir: join(homedir(), '.config', 'ai-code-cli', 'skills'),
+    projectDir: join(cwd, '.ai-code-cli', 'skills'),
+  });
+  if (skillsEnabled) skillRegistry.discover();
+
   // ── 会话 ──────────────────────────────────────────────────────────────
   // 注入系统提示作为上下文首条（system role → Provider 提取为顶层 system 字段）。
+  // enabled 且发现到技能 → 在既有正文后追加 L1 技能目录；否则用既有 SYSTEM_PROMPT 常量。
   const session = new Session({ rootDir: cwd });
-  session.append({ role: 'system', content: SYSTEM_PROMPT });
+  const systemPrompt = skillsEnabled
+    ? buildSystemPrompt({ skills: skillRegistry.buildSkillCatalog() })
+    : SYSTEM_PROMPT;
+  session.append({ role: 'system', content: systemPrompt });
 
-  // ── 工具注册表（7 个内置原子工具 + update_plan）─────────────────────────
+  // ── 工具注册表（9 个内置原子工具 + update_plan（+ use_skill 当 skills 开启））────
   // PlanStore 在 cli 创建并同时注入工具与 TUI，保证 update_plan 工具与 /plan 命令共享同一计划。
+  // skills 开启时把 skillRegistry 传入 → 追加 use_skill；关闭则不注册，工具集保持确定。
   const planStore = new PlanStore();
-  const tools = createDefaultRegistry(planStore);
+  const tools = createDefaultRegistry(planStore, skillsEnabled ? skillRegistry : undefined);
   const checkpointStore = new CheckpointStore(cwd);
 
   // ── Provider 工厂 ──────────────────────────────────────────────────────
@@ -102,6 +121,7 @@ function main(): void {
       makeProvider,
       checkpointStore,
       planStore,
+      skills: skillsEnabled ? skillRegistry : undefined,
     }),
   );
 

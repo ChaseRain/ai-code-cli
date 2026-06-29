@@ -14,7 +14,7 @@
    - ② 领域 `docs/design-docs/domain-model.md`（限界上下文 / 统一语言 / 聚合）
    - ③ 系统 `ARCHITECTURE.md`（分层、目录边界、依赖规则、数据流）
    - 跨层时序 `docs/design-docs/flows.md`
-3. `docs/product-specs/index.md` — 各功能域规格目录（含状态与测试覆盖映射）。
+3. `docs/product-specs/index.md` — 各功能域规格目录（含状态与测试覆盖映射）。技能系统（渐进式加载 SKILL.md）见 `docs/product-specs/skills.md`。
 4. `docs/exec-plans/active/` — 当前在做什么、进度、决策日志（plans 是一等工件）。
 5. `docs/references/` — 外部事实唯一来源（理念原文、L2 命题、Coding Plan API）。
 

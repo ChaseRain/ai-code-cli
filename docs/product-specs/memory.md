@@ -18,7 +18,7 @@
 1. **会话恢复（Resume）**：从 `.ai_history/logs/*.jsonl` 恢复最近一次（或指定）会话上下文。
 2. **上下文压缩（Compaction / Summary）**：历史超阈值时，把较旧轮次摘要为一条 summary 消息，保留近窗 + 关键事实，控制 token 膨胀。
 3. **实时自动压缩**：Agent Loop 在每轮发起 `provider.chat` 前执行阈值检查，超限则压缩旧上下文，并发出 UI 事件。
-4. **内置命令**：`/resume`（恢复最近会话）、`/memory`（**仅查看**记忆状态：消息数 / system 数 / 是否含摘要 hasSummary / 当前日志；不触发压缩）。
+4. **内置命令**：`/resume`（无参打开会话选择器恢复；`/resume latest` 直接恢复最近会话，见 session-browser.md）、`/memory`（**仅查看**记忆状态：消息数 / system 数 / 是否含摘要 hasSummary / 当前日志；不触发压缩）。
 
 ## 设计契约（接口草案，最小集）
 

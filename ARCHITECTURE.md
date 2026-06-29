@@ -43,6 +43,7 @@
 | `tui/` | Ink 组件 + 内置命令 | product-specs/tui.md |
 | `checkpoint/` | 本地 checkpoint/restore 快照 | product-specs/checkpoint.md |
 | `workspace/` | Git 探测、status、diff、降级摘要、写前 preview | product-specs/diff-git.md |
+| `skills/` | **支撑域（能力扩展）**：发现/解析两级 `SKILL.md`、frontmatter 解析、L1 目录与按需加载正文 | product-specs/skills.md |
 
 ## 依赖规则（关键，CI 应能机械校验方向）
 
@@ -53,6 +54,7 @@
 - `checkpoint/` 和 `workspace/` 是支撑域；`agent/loop` 只调用其接口，不内嵌快照或 git 细节。
 - memory compaction 由 `session` 提供能力，`agent/loop` 只在 Provider 请求前触发；摘要失败不阻断主循环。
 - `plan/` 是纯内存 harness 状态：`update_plan` 工具与 `/plan` 命令共享 cli 注入的**同一个 PlanStore**；不写项目文件、不执行步骤。
+- `skills/` 是支撑域：**`agent/loop` 不认识 skills**；技能仅经 **system prompt（L1 目录）** 与 **`use_skill` 工具（L2 正文）** 进入上下文，L3 资源由模型显式走既有只读/敏感工具读取。`cli` 装配时构造 `SkillRegistry` 并注入；技能正文按数据处理，不被赋予超出普通工具结果的特权。
 
 ## 数据流（一轮）
 

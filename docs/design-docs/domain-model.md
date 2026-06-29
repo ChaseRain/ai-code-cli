@@ -17,6 +17,7 @@
 | **ToolCall / ToolResult** | 模型发起的工具调用 / 其结构化结果（成功或错误） |
 | **Permission Decision 授权决策** | 对敏感工具调用的 allow/deny |
 | **Provider 模型网关** | 对接 LLM 协议、产出流式事件 |
+| **Skill 技能** | 一个本地 `SKILL.md` 沉淀的可复用工作流/领域知识；三级渐进式披露（L1 目录 / L2 正文 / L3 资源） |
 
 ## 限界上下文（Bounded Contexts）
 
@@ -30,6 +31,7 @@
 | **Model Gateway 模型网关** | 通用域 | 协议封装、流式、超时、重试 | 不认识工具语义 |
 | **Configuration 配置** | 通用域 | 用户级/项目级合并、密钥保护 | 不持有运行状态 |
 | **Presentation（TUI）** | 表现层 | 输入/输出/状态/确认交互 | 不内嵌业务逻辑 |
+| **Skills 能力扩展** | 支撑域 | 发现/解析两级 `SKILL.md`、L1 目录注入与按需加载正文 | 不认识 Agent Loop；仅经 system prompt 与 `use_skill` 工具进入上下文 |
 
 > 核心域是 **Agent 编排**——这是本项目的差异化所在，投入最多设计；其余按支撑/通用域对待，能简则简。
 

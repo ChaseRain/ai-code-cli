@@ -24,6 +24,11 @@ const MEMORY_DEFAULTS: Config['memory'] = {
   summarizer: 'heuristic',
 };
 
+/** 技能系统配置默认值（Phase-11，与 config.md / skills.md 一致）。 */
+const SKILLS_DEFAULTS: Config['skills'] = {
+  enabled: true,
+};
+
 const DEFAULTS: Config = {
   provider: 'anthropic',
   model: 'deepseek/deepseek-v4-pro',
@@ -32,6 +37,7 @@ const DEFAULTS: Config = {
   maxTurns: 25,
   maxRetries: 2,
   memory: MEMORY_DEFAULTS,
+  skills: SKILLS_DEFAULTS,
 };
 
 // ============================================================================
@@ -64,6 +70,16 @@ const MemorySchema = z
   })
   .strict();
 
+/**
+ * 技能系统配置 schema（Phase-11）。沿用 memory 的「子对象可逐项缺省、出现时校验」模式。
+ * 终态用 .strict() 拒绝未知子字段。
+ */
+const SkillsSchema = z
+  .object({
+    enabled: z.boolean(),
+  })
+  .strict();
+
 const ConfigSchema = z
   .object({
     provider: z.literal('anthropic'),
@@ -74,6 +90,7 @@ const ConfigSchema = z
     maxTurns: z.number().int().positive().max(50, 'maxTurns 不能超过 50'),
     maxRetries: z.number().int().nonnegative().max(5, 'maxRetries 不能超过 5'),
     memory: MemorySchema,
+    skills: SkillsSchema,
   })
   .strict();
 
@@ -84,6 +101,7 @@ const ConfigSchema = z
 const PartialFileSchema = ConfigSchema.partial()
   .extend({
     memory: MemorySchema.partial().strict().optional(),
+    skills: SkillsSchema.partial().strict().optional(),
     // 允许配置文件写 apiKey 作为兜底，但它不进入 Config，仅用于密钥解析。
     apiKey: z.string().optional(),
   })
@@ -259,9 +277,14 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   const userFile = readConfigFile(userConfigPath());
   const projectFile = readConfigFile(projectConfigPath(cwd));
 
-  // 剥离 apiKey：它不属于 Config，仅参与密钥解析。
-  const { apiKey: userApiKey, memory: userMemory, ...userConfig } = userFile;
-  const { apiKey: projectApiKey, memory: projectMemory, ...projectConfig } = projectFile;
+  // 剥离 apiKey：它不属于 Config，仅参与密钥解析。子对象（memory/skills）单独深合并。
+  const { apiKey: userApiKey, memory: userMemory, skills: userSkills, ...userConfig } = userFile;
+  const {
+    apiKey: projectApiKey,
+    memory: projectMemory,
+    skills: projectSkills,
+    ...projectConfig
+  } = projectFile;
 
   // 深合并：默认值 ← 用户级 ← 项目级（顶层扁平字段）。
   let merged: Config = mergeLayer(DEFAULTS, userConfig);
@@ -273,6 +296,11 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   // 环境变量覆盖（优先级最高）。
   memory = applyMemoryEnvOverrides(memory);
   merged.memory = memory;
+
+  // skills 子对象单独深合并（逐子字段覆盖，未覆盖项保留下层值）。
+  let skills = mergeLayer(SKILLS_DEFAULTS, userSkills ?? {});
+  skills = mergeLayer(skills, projectSkills ?? {});
+  merged.skills = skills;
 
   // 终态再次完整校验（防御默认值漂移；同时把合并结果收敛到 Config 形态）。
   const result = ConfigSchema.safeParse(merged);

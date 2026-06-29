@@ -36,3 +36,32 @@ export const SYSTEM_PROMPT = `你是一个运行在终端里的编码 Agent，�
 # 完成标准
 - 当任务已达成、不再需要调用工具时，给出最终回复总结你做了什么。
 - 改动代码时保持最小且聚焦，遵循项目既有风格与约定。`;
+
+// ============================================================================
+// Skills（渐进式披露 L1）—— 把技能目录注入 system prompt。见 product-specs/skills.md。
+// 平时只放「名字 + 描述」（每技能 1 行），任务匹配时模型才用 use_skill 加载正文（L2）。
+// ============================================================================
+
+/** buildSystemPrompt 的入参：当前已发现的技能目录（catalog 为格式化好的 L1 文本）。 */
+export interface BuildSystemPromptOptions {
+  /** L1 目录文本（SkillRegistry.buildSkillCatalog 的结果）；空串 / 省略 → 不加该节。 */
+  skills?: string;
+}
+
+/**
+ * 组装系统提示：既有正文 + （有技能时）「# 可用技能」一节。
+ * - 无技能（skills 省略 / 空串）→ 直接返回 SYSTEM_PROMPT（与既有行为完全一致）。
+ * - 有技能 → 追加目录节 + 使用指令：任务匹配某技能时先 use_skill 加载完整说明再执行。
+ */
+export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): string {
+  const catalog = (options.skills ?? '').trim();
+  if (catalog.length === 0) return SYSTEM_PROMPT;
+  return (
+    SYSTEM_PROMPT +
+    '\n\n# 可用技能（按需用 use_skill 加载）\n' +
+    '下列技能是可复用的工作流 / 领域知识，平时只展示名字与描述。' +
+    '当任务匹配某个技能时，先调用 use_skill({ name }) 加载它的完整说明，再据此执行；' +
+    '不匹配则忽略，不要无谓加载。\n' +
+    catalog
+  );
+}

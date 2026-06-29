@@ -26,6 +26,7 @@ import {
   moveFile,
   runShell,
 } from '../src/tools/index.js';
+import { SkillRegistry } from '../src/skills/index.js';
 
 let rootDir: string;
 
@@ -286,6 +287,19 @@ describe('ToolRegistry', () => {
     const rw = reg.list().filter((t) => !t.readOnly).map((t) => t.name);
     expect(ro).toEqual(['list_dir', 'read_file', 'glob', 'grep', 'update_plan']);
     expect(rw).toEqual(['write_file', 'edit_file', 'delete_file', 'move_file', 'run_shell']);
+  });
+
+  it('注入 skillRegistry 时追加 use_skill（11 个，readOnly）；省略则不注册（Phase-11）', () => {
+    // 省略 skillRegistry → 工具集确定为 10（与默认集一致）。
+    expect(createDefaultRegistry().has('use_skill')).toBe(false);
+    expect(createDefaultRegistry().list()).toHaveLength(10);
+
+    // 注入 skillRegistry → 追加 use_skill（readOnly），共 11 个。
+    const sr = new SkillRegistry({ userDir: '/nonexistent/u', projectDir: '/nonexistent/p' });
+    const reg = createDefaultRegistry(undefined, sr);
+    expect(reg.list()).toHaveLength(11);
+    expect(reg.has('use_skill')).toBe(true);
+    expect(reg.get('use_skill')!.readOnly).toBe(true);
   });
 
   it('未知工具 execute → ok:false（不抛异常）', async () => {

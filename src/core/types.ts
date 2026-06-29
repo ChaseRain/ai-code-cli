@@ -120,6 +120,14 @@ export interface Config {
   maxRetries: number;
   /** 记忆 / 上下文压缩配置（Phase-9 M3，见 config.md / memory.md），始终有默认值。 */
   memory: MemoryConfig;
+  /** 技能系统配置（Phase-11，见 config.md / skills.md），始终有默认值。 */
+  skills: SkillsConfig;
+}
+
+/** 技能系统配置（Phase-11）。各字段均有默认值，合并后必填齐。 */
+export interface SkillsConfig {
+  /** 是否启用技能系统，默认 true。关闭时不注入 L1 目录、不注册 use_skill 工具。 */
+  enabled: boolean;
 }
 
 /** 记忆 / 上下文压缩配置（Phase-9 M3）。各字段均有默认值，合并后必填齐。 */
