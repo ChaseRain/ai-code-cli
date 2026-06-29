@@ -1,6 +1,6 @@
 # Exec Plan: Phase 10 — 评审 Loop Round-2（工程质量自洽 + 工具系统补全）
 
-> 状态：implemented（代码 + 测试已落地，296/296 通过，build exit 0） · 最后更新：2026-06-29
+> 状态：implemented（代码 + 测试已落地，337/337 通过，build exit 0） · 最后更新：2026-06-29
 > 承接 Phase-9：`npm run build && npm test` = 243/243、build exit 0、真实 API 冒烟跑通。
 > 纪律：**docs-first**。本计划 + 受影响 spec 评审通过后再进入代码阶段。当前分支，`src/cli.tsx` 仍只做 composition root。
 
@@ -25,7 +25,12 @@ Round-1 已补齐基线可靠性（P1/P2/P3）与头号加分（记忆增强 M1-
   - 新增 `/rewind`（**checkpoint 回滚的主流命令**）：无参打开**快照选择器**、选定后进入 `confirm-restore`（y/n）；`/rewind <id>` 直接进入确认（等价 `/restore <id>`，见 checkpoint.md）。
   - 执行器新增 `open-checkpoint-picker` 副作用；`App` 用判别联合 `PickerState{mode:'session'|'checkpoint'}` 承载两类选择器，共用一套 ↑/↓/Enter/Esc 键盘逻辑与窗口滚动的 `PickerView` 渲染（会话 Enter→恢复日志；快照 Enter→回滚确认）。
   - 测试：`tests/tui-command.test.ts`（`/rewind` 解析 + HELP_TEXT 防漂移含 `/rewind` `/resume`）、`tests/command-executor.test.ts`（`/rewind` 空/有数据/带 id/列举失败 4 态、`/resume` 无参 open-session-picker）。
-- [x] **回归**：`npm run build` exit 0；`npm test` 全绿 **296/296**（基线 243 + Q1/T1/T2 48 + U1 5：command-executor `/rewind` 4 + command 解析/HELP 1）；TUI 渲染冒烟（tui-render）行为不变。
+- [x] **U2 `/model` 动态切换 + 可用模型组（Round-2 追加）**：用户反馈「改 `.env` 的 `ANTHROPIC_MODEL` 换模型不生效」。根因——按 config.md「首期不做 env 覆盖」，`loadConfig` 只读密钥、不读 env `MODEL`/`BASE_URL`（设计如此，本轮不反转）。正确切换路径是运行时 `/model <id>`（已有链路：`set-model` 副作用 → App `setModel` → 下次 `runAgent` 经 RunOpts 注入 `ChatRequest.model`，Provider 不缓存 model）。
+  - `src/config/index.ts` 导出 `AVAILABLE_MODELS`（网关当前可用 8 模型，单一真相来源）。
+  - `/model`（无参）由「仅显示当前模型」升级为**交互式模型选择器**（`open-model-picker` 副作用 → `PickerState{mode:'model'}`，↑/↓ 移动 · Enter 动态切换 `setModel`（立即生效）· Esc 取消；`*` 标注当前生效模型）；`/model <id>` 直接切换，列表外 id **仅提示不拒绝**（网关可能新增）。
+  - `App` 的 `PickerState` 扩为三模式 `session|checkpoint|model`，三类选择器共用同一 `PickerView` + ↑/↓/Enter/Esc 键盘逻辑（Enter：会话恢复 / 快照确认 / 模型切换）。
+  - 测试：`tests/command-executor.test.ts`（`/model` 无参 → `open-model-picker`（携 items/current/index）、当前在清单内则高亮、`/model <内置 id>` 无「列表外」提示、`/model <列表外 id>` 仍切换且提示）。受影响 spec：config.md / tui.md / provider.md（+ `.env.example` 澄清）。
+- [x] **回归**：`npm run build` exit 0；`npm test` 全绿 **337/337**；TUI 渲染冒烟（tui-render）行为不变。
 
 ## 不做（本轮）
 - 投机性 future-proofing（version 字段、快照迁移、baseURL 脱敏、ripgrep/PCRE、可折叠 TUI、↑↓ 历史检索）——与 less is more 冲突或明确「不做（首期）」。

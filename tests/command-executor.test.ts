@@ -85,16 +85,44 @@ describe('CommandExecutor —— 纯展示命令', () => {
     expect(t).toMatch(/已配置/);
   });
 
-  it('/model 无参 → 展示当前模型，effect none', async () => {
+  it('/model 无参 → 打开模型选择器（携当前模型 + 可切换模型组）', async () => {
     const o = await run(mkExecutor(), '/model');
-    expect(o.messages[0].text).toMatch(/当前模型：claude-x/);
-    expect(o.effect).toEqual({ type: 'none' });
+    expect(o.messages).toEqual([]);
+    expect(o.effect.type).toBe('open-model-picker');
+    if (o.effect.type === 'open-model-picker') {
+      // 携带网关可用模型组（抽查两个 id）+ 当前模型。
+      expect(o.effect.items).toContain('deepseek/deepseek-v4-pro');
+      expect(o.effect.items).toContain('zhipu/glm-5.2');
+      expect(o.effect.current).toBe('claude-x');
+      // 当前模型 claude-x 不在清单 → index 回落 0。
+      expect(o.effect.index).toBe(0);
+    }
   });
 
-  it('/model <id> → set-model 副作用', async () => {
+  it('/model 无参 当前在清单内 → 选择器高亮当前模型', async () => {
+    const o = await run(
+      mkExecutor({ status: () => ({ ...STATUS(), model: 'zhipu/glm-5' }) }),
+      '/model',
+    );
+    expect(o.effect.type).toBe('open-model-picker');
+    if (o.effect.type === 'open-model-picker') {
+      expect(o.effect.current).toBe('zhipu/glm-5');
+      expect(o.effect.items[o.effect.index]).toBe('zhipu/glm-5');
+    }
+  });
+
+  it('/model <内置 id> → set-model，无「列表外」提示', async () => {
+    const o = await run(mkExecutor(), '/model deepseek/deepseek-v4-flash');
+    expect(o.effect).toEqual({ type: 'set-model', id: 'deepseek/deepseek-v4-flash' });
+    expect(o.messages[0].text).toMatch(/已切换模型：deepseek\/deepseek-v4-flash/);
+    expect(o.messages[0].text).not.toMatch(/不在内置/);
+  });
+
+  it('/model <列表外 id> → 仍切换，但提示不在内置清单', async () => {
     const o = await run(mkExecutor(), '/model claude-new');
     expect(o.effect).toEqual({ type: 'set-model', id: 'claude-new' });
     expect(o.messages[0].text).toMatch(/已切换模型：claude-new/);
+    expect(o.messages[0].text).toMatch(/不在内置可用清单/);
   });
 
   it('/clear → clear-session 副作用、不回显、无消息', async () => {

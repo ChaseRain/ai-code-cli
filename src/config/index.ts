@@ -40,6 +40,23 @@ const DEFAULTS: Config = {
   skills: SKILLS_DEFAULTS,
 };
 
+/**
+ * 网关「当前可用的模型组」（codeplan 网关，Anthropic 协议）。
+ * 用途：`/model` 无参列出可切换项、`/model <id>` 校验提示（单一真相来源）。
+ * 注意：这是**展示/提示用的已知清单**，不是硬校验白名单——网关随时可能新增模型，
+ *   故 `/model <id>` 仍允许列表外 id（只提示「不在内置清单」，不拒绝切换）。
+ */
+export const AVAILABLE_MODELS: readonly string[] = [
+  'moonshot/kimi-k2.5',
+  'deepseek/deepseek-v4-pro',
+  'xiaomi/mimo-v2.5-pro',
+  'ali/qwen3.7-max',
+  'deepseek/deepseek-v4-flash',
+  'google/gemini-3.5-flash',
+  'zhipu/glm-5',
+  'zhipu/glm-5.2',
+];
+
 // ============================================================================
 // zod schema —— 校验合并后的最终配置。
 // 全部字段可缺省（缺失回落默认值），但出现时必须类型/取值正确。

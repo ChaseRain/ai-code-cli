@@ -25,7 +25,15 @@
 
 > ⚠️ **环境变量仅读密钥**：`loadConfig` 只从环境变量解析 `apiKey`（`ANTHROPIC_AUTH_TOKEN` / `CODEPLAN_API_KEY`）。
 > `baseURL`、`model` 等字段**不读环境变量**，只来自 DEFAULTS 或 config.json（见下「不做（首期）」）。
-> 因此 `.env` 里的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 当前不生效；要改请写 `.ai-code-cli/config.json`。
+> 因此 `.env` 里的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 当前不生效。**切换模型的推荐方式是运行时 `/model <id>`**（立即对下一个任务生效、无需重启）；要改默认模型/网关写 `.ai-code-cli/config.json`。
+
+### 可用模型组 + 运行时切换（`AVAILABLE_MODELS`）
+- `src/config/index.ts` 导出 `AVAILABLE_MODELS`（codeplan 网关「当前可用的模型组」，单一真相来源）：
+  `moonshot/kimi-k2.5`、`deepseek/deepseek-v4-pro`、`xiaomi/mimo-v2.5-pro`、`ali/qwen3.7-max`、
+  `deepseek/deepseek-v4-flash`、`google/gemini-3.5-flash`、`zhipu/glm-5`、`zhipu/glm-5.2`。
+- `/model`（无参）打开**模型选择器**（↑/↓ 移动 · Enter 动态切换 · Esc 取消；`*` 标注当前生效模型）；`/model <id>` 直接动态切换。
+- 这是**展示/提示用的已知清单，不是硬校验白名单**：`/model <id>` 仍接受清单外 id（只提示「不在内置清单」，不拒绝切换），因为网关可能随时新增模型。
+- 机制：`/model <id>` 经执行器 `set-model` 副作用 → App `setModel` → 下次 `runAgent` 经 RunOpts 注入 `ChatRequest.model`（Provider 不缓存 model，见 [`provider.md`](provider.md) / [`tui.md`](tui.md)）。
 
 ## 硬上限（Phase-7 P7-C，Loop 不失控）
 zod 除类型/正数外加 `.max()`：`timeoutMs ≤ 120000`（与 run_shell 上限一致）、`maxTurns ≤ 50`、`maxRetries ≤ 5`。

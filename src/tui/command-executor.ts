@@ -16,6 +16,7 @@
 
 import type { ParsedInput } from './command.js';
 import { HELP_TEXT } from './command.js';
+import { AVAILABLE_MODELS } from '../config/index.js';
 import type { MemoryCompactionOptions } from '../agent/index.js';
 import type { CheckpointManifest, CheckpointStore } from '../checkpoint/index.js';
 import type { PlanStore } from '../plan/index.js';
@@ -81,6 +82,7 @@ export type CommandEffect =
   | { type: 'none' }
   | { type: 'clear-session' } // session.clear + permission.reset + 重置 turn
   | { type: 'set-model'; id: string }
+  | { type: 'open-model-picker'; items: string[]; current: string; index: number }
   | { type: 'open-session-picker'; items: SessionSummary[]; index: number }
   | { type: 'open-checkpoint-picker'; items: CheckpointManifest[]; index: number }
   | { type: 'resume'; target: string } // 已解析好的日志目标
@@ -172,11 +174,28 @@ export function createCommandExecutor(deps: CommandDeps): CommandExecutor {
       case 'model': {
         const s = status();
         if (!parsed.id) {
-          return { echoUser: true, messages: [sys(`当前模型：${s.model}`)], effect: NONE };
+          // 无参：打开模型选择器（↑/↓ 选 · Enter 动态切换 · Esc 取消），默认高亮当前模型。
+          const cur = AVAILABLE_MODELS.indexOf(s.model);
+          return {
+            echoUser: true,
+            messages: [],
+            effect: {
+              type: 'open-model-picker',
+              items: [...AVAILABLE_MODELS],
+              current: s.model,
+              index: cur >= 0 ? cur : 0,
+            },
+          };
         }
+        // 切换：运行时动态生效（对下一次任务即生效，无需重启）。
+        // 列表外 id 不拒绝，仅提示——网关可能新增模型。
+        const known = AVAILABLE_MODELS.includes(parsed.id);
+        const note = known
+          ? `已切换模型：${parsed.id}`
+          : `已切换模型：${parsed.id}（不在内置可用清单，仍尝试切换；/model 查看可用模型组）`;
         return {
           echoUser: true,
-          messages: [sys(`已切换模型：${parsed.id}`)],
+          messages: [sys(note)],
           effect: { type: 'set-model', id: parsed.id },
         };
       }

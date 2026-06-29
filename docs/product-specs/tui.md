@@ -22,7 +22,7 @@ assistant 文本随 SSE 增量刷新（消费 `provider` 经 `loop` 转发的 UI
 |---|---|
 | `/help` | 显示命令与用法 |
 | `/clear` | 清空当前会话上下文（开新日志） |
-| `/model` / `/model <id>` | 查看 / 切换当前模型 |
+| `/model` / `/model <id>` | `/model` 无参打开**模型选择器**（↑/↓ 移动 · Enter 动态切换 · Esc 取消；列出 `AVAILABLE_MODELS`、`*` 标注当前生效模型）；`/model <id>` 直接动态切换（立即对下一个任务生效、无需重启；清单外 id 仅提示不拒绝，见 config.md / provider.md） |
 | `/status` | 显示模型、baseURL、轮次上限/当前轮次、Key 是否已配置（不显明文） |
 | `/resume` | 打开会话选择器恢复（无参，主流约定）；`/resume <path>` 直接恢复指定 jsonl 日志（见 memory.md） |
 | `/sessions` | 打开会话选择器（`/resume` 无参的别名，最近 50，见 session-browser.md） |
@@ -79,6 +79,7 @@ type CommandEffect =
   | { type: 'none' }
   | { type: 'clear-session' }                       // session.clear + permission.reset + 重置 turn
   | { type: 'set-model'; id: string }
+  | { type: 'open-model-picker'; items: string[]; current: string; index: number } // /model 无参
   | { type: 'open-session-picker'; items: SessionSummary[]; index: number }
   | { type: 'open-checkpoint-picker'; items: CheckpointManifest[]; index: number } // /rewind 无参
   | { type: 'resume'; target: string }              // 已解析好的日志目标
@@ -101,7 +102,7 @@ export function createCommandExecutor(deps: CommandDeps): CommandExecutor;
 
 ### 取舍说明
 - **纯异步函数 + 注入 deps**：`run` 返回 `CommandOutcome` 数据，不接触 React 状态；测试只需断言 `messages`/`effect`，无需渲染。
-- **副作用以「描述」返回而非执行**：`/restore` `/undo-last` `/rewind <id>` 返回 `confirm-restore` 让 `App` 进入确认态（确认后的 `checkpointStore.restore` 仍在 `App` 的 `confirmRestore` 里，因为它依赖弹窗按键流）；`/resume`(无参)`/sessions` 返回 `open-session-picker`、`/rewind`(无参) 返回 `open-checkpoint-picker` 让 `App` 持有 picker state（`App` 用判别联合 `PickerState{mode:'session'|'checkpoint'}` 承载，共用一套 ↑/↓/Enter/Esc 键盘逻辑与 `PickerView` 渲染：会话模式 Enter 恢复日志、快照模式 Enter 进入 y/n 回滚确认）。执行器只负责「算出该做什么 + 查好数据」。
+- **副作用以「描述」返回而非执行**：`/restore` `/undo-last` `/rewind <id>` 返回 `confirm-restore` 让 `App` 进入确认态（确认后的 `checkpointStore.restore` 仍在 `App` 的 `confirmRestore` 里，因为它依赖弹窗按键流）；`/resume`(无参)`/sessions` 返回 `open-session-picker`、`/rewind`(无参) 返回 `open-checkpoint-picker`、`/model`(无参) 返回 `open-model-picker` 让 `App` 持有 picker state（`App` 用判别联合 `PickerState{mode:'session'|'checkpoint'|'model'}` 承载，共用一套 ↑/↓/Enter/Esc 键盘逻辑与 `PickerView` 渲染：会话模式 Enter 恢复日志、快照模式 Enter 进入 y/n 回滚确认、模型模式 Enter 动态切换 `setModel`（立即生效））。执行器只负责「算出该做什么 + 查好数据」。
 - **`exit`/`set-model`/`clear-session` 仍由 App 执行**：这些是 Ink/React 运行时能力（`exit()`、`setModel`、`setMessages`），执行器只发出意图。
 - 不引入 future-proofing（命令插件机制、撤销栈等，本轮不做）。
 
@@ -116,6 +117,7 @@ export function createCommandExecutor(deps: CommandDeps): CommandExecutor;
   缺 id 报错 vs 有 id 返回 `confirm-restore`、`/resume`(无参)/`/sessions` 空 vs `open-session-picker`、
   `/resume <path>` 解析出 `resume` target vs 无日志报错、
   `/rewind`(无参) 空 vs `open-checkpoint-picker`、`/rewind <id>` 返回 `confirm-restore`、
+  `/model`(无参) 返回 `open-model-picker`（携 items/current/index，当前在清单内则高亮）、`/model <id>` 返回 `set-model`（清单外 id 仅提示不拒绝）、
   `/changes` `/diff` 调 workspace 查询并格式化、
   `/undo-last` 无自动 checkpoint vs `confirm-restore`、`/plan` `/plan clear`、`/memory` 状态、
   IO 失败收敛为 `error` 消息（不抛）；`unknown`/`task` 分支正确。

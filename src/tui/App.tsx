@@ -69,7 +69,8 @@ interface PendingPermission {
  */
 type PickerState =
   | { mode: 'session'; items: SessionSummary[]; index: number }
-  | { mode: 'checkpoint'; items: CheckpointManifest[]; index: number };
+  | { mode: 'checkpoint'; items: CheckpointManifest[]; index: number }
+  | { mode: 'model'; items: string[]; current: string; index: number };
 
 // ============================================================================
 // 根组件
@@ -335,6 +336,9 @@ export function App(props: AppProps): React.JSX.Element {
         case 'set-model':
           setModel(eff.id);
           return;
+        case 'open-model-picker':
+          setPicker({ mode: 'model', items: eff.items, current: eff.current, index: eff.index });
+          return;
         case 'open-session-picker':
           setPicker({ mode: 'session', items: eff.items, index: eff.index });
           return;
@@ -410,17 +414,32 @@ export function App(props: AppProps): React.JSX.Element {
       } else if (key.downArrow || (key.ctrl && inputChar === 'n')) {
         setPicker((s) => (s ? { ...s, index: (s.index + 1) % n } : s));
       } else if (key.return) {
-        setPicker(null);
-        // 会话：直接恢复日志；快照：进入回滚确认（y/n，复用 pendingRestore 流程）。
+        // 会话：恢复日志；快照：进入回滚确认（y/n）；模型：动态切换（立即生效）。
         if (picker.mode === 'session') {
           const sel = picker.items[picker.index];
+          setPicker(null);
           if (sel) resumeFromTarget(sel.logPath);
+        } else if (picker.mode === 'checkpoint') {
+          const sel = picker.items[picker.index];
+          setPicker(null);
+          if (sel) setPendingRestore(sel.id);
         } else {
           const sel = picker.items[picker.index];
-          if (sel) setPendingRestore(sel.id);
+          setPicker(null);
+          if (sel) {
+            setModel(sel);
+            push({
+              kind: 'system',
+              text:
+                sel === picker.current
+                  ? `仍使用当前模型：${sel}`
+                  : `已切换模型：${sel}（立即对下一个任务生效）`,
+            });
+          }
         }
       } else if (key.escape) {
-        const what = picker.mode === 'session' ? '会话选择' : '回滚选择';
+        const what =
+          picker.mode === 'session' ? '会话选择' : picker.mode === 'checkpoint' ? '回滚选择' : '模型切换';
         setPicker(null);
         push({ kind: 'system', text: `已取消${what}。` });
       }
@@ -592,22 +611,33 @@ export function RestorePrompt({ id }: { id: string }): React.JSX.Element {
 
 /** 选择器标题（含操作提示），随模式而变。 */
 export function pickerTitle(p: PickerState): string {
-  return p.mode === 'session'
-    ? '选择会话恢复（↑/↓ 移动 · Enter 恢复 · Esc 取消）'
-    : '选择快照回滚（↑/↓ 移动 · Enter 确认 · Esc 取消）';
+  switch (p.mode) {
+    case 'session':
+      return '选择会话恢复（↑/↓ 移动 · Enter 恢复 · Esc 取消）';
+    case 'checkpoint':
+      return '选择快照回滚（↑/↓ 移动 · Enter 确认 · Esc 取消）';
+    case 'model':
+      return '切换模型（↑/↓ 移动 · Enter 动态切换 · Esc 取消）';
+  }
 }
 
 /** 把选择器条目格式化为展示行（每条一行）。 */
 export function pickerLines(p: PickerState): string[] {
-  return p.mode === 'session'
-    ? p.items.map(
+  switch (p.mode) {
+    case 'session':
+      return p.items.map(
         (s) =>
           `${s.current ? '*' : ' '} ${s.title} · ${s.messages} msg · ${s.toolCalls} tools · ${s.updatedAt}`,
-      )
-    : p.items.map(
+      );
+    case 'checkpoint':
+      return p.items.map(
         (c) =>
           `${c.trigger === 'auto' ? '~' : '·'} ${c.label ?? '(无标签)'} · ${c.files.length} files · ${c.createdAt}`,
       );
+    case 'model':
+      // `*` 标注当前生效模型（与高亮的「光标项」相互独立）。
+      return p.items.map((m) => `${m === p.current ? '*' : ' '} ${m}`);
+  }
 }
 
 /** 通用列表选择器视图：高亮当前项，窗口滚动（最多展示 VISIBLE 行）。 */

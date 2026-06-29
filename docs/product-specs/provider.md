@@ -25,6 +25,7 @@ interface Provider { chat(req: ChatRequest): AsyncIterable<ProviderEvent>; }
 - Headers：`Authorization: Bearer <ANTHROPIC_AUTH_TOKEN>`、`anthropic-version: 2023-06-01`、`Content-Type: application/json`。
 - 请求体（Anthropic Messages 格式）：
   - `model`、`max_tokens`、`messages`、`tools`（`{name, description, input_schema}`）、`stream:true`。
+  - **`model` 来自每次 `ChatRequest.model`，Provider 不缓存**：模型由 Loop 经 RunOpts 注入、源头是 App 的 `model` state（`config.model` 初值，`/model <id>` 运行时改）。故切模型无需重建 Provider、无需重启——下一次 `chat()` 即用新 model。可切换的模型组见 `AVAILABLE_MODELS`（config.md）。
   - `system` 作为顶层字段（不是 message role）。
   - **工具结果**回传：以 `role:"user"` 的 `content:[{type:"tool_result", tool_use_id, content}]`；
     工具调用在 `role:"assistant"` 的 `content:[{type:"tool_use", id, name, input}]`。
