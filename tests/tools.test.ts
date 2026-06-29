@@ -22,6 +22,8 @@ import {
   grep,
   writeFile,
   editFile,
+  deleteFile,
+  moveFile,
   runShell,
 } from '../src/tools/index.js';
 
@@ -245,17 +247,19 @@ describe('run_shell', () => {
 // ToolRegistry
 // ---------------------------------------------------------------------------
 describe('ToolRegistry', () => {
-  it('createDefaultRegistry 装入 7 个内置工具 + update_plan（TP6）', () => {
+  it('createDefaultRegistry 装入 9 个内置工具 + update_plan（TP6 + Phase-10 T1）', () => {
     const reg = createDefaultRegistry();
-    expect(reg.list()).toHaveLength(8);
-    expect(builtinTools).toHaveLength(7); // 原 7 个文件/Shell 工具不退化
+    expect(reg.list()).toHaveLength(10);
+    expect(builtinTools).toHaveLength(9); // 9 个文件/Shell 工具（含 delete_file/move_file）
     expect(reg.has('update_plan')).toBe(true);
+    expect(reg.has('delete_file')).toBe(true);
+    expect(reg.has('move_file')).toBe(true);
   });
 
   it('toSchemas 输出 ToolSchema（name/description/parameters）', () => {
     const reg = createDefaultRegistry();
     const schemas = reg.toSchemas();
-    expect(schemas).toHaveLength(8);
+    expect(schemas).toHaveLength(10);
     for (const s of schemas) {
       expect(typeof s.name).toBe('string');
       expect(typeof s.description).toBe('string');
@@ -269,17 +273,19 @@ describe('ToolRegistry', () => {
       'grep',
       'write_file',
       'edit_file',
+      'delete_file',
+      'move_file',
       'run_shell',
       'update_plan',
     ]);
   });
 
-  it('readOnly 标记正确：只读 5 个（含 update_plan），敏感 3 个', () => {
+  it('readOnly 标记正确：只读 5 个（含 update_plan），敏感 5 个（含 delete_file/move_file）', () => {
     const reg = createDefaultRegistry();
     const ro = reg.list().filter((t) => t.readOnly).map((t) => t.name);
     const rw = reg.list().filter((t) => !t.readOnly).map((t) => t.name);
     expect(ro).toEqual(['list_dir', 'read_file', 'glob', 'grep', 'update_plan']);
-    expect(rw).toEqual(['write_file', 'edit_file', 'run_shell']);
+    expect(rw).toEqual(['write_file', 'edit_file', 'delete_file', 'move_file', 'run_shell']);
   });
 
   it('未知工具 execute → ok:false（不抛异常）', async () => {
@@ -374,5 +380,146 @@ describe('P7-D run_shell 进程树清理', () => {
       // 兜底清理：即便断言失败也不残留进程。
       try { execFileSync('pkill', ['-9', '-f', marker]); } catch { /* 无残留 */ }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase-10 T1：delete_file / move_file
+// ---------------------------------------------------------------------------
+describe('delete_file（Phase-10 T1）', () => {
+  it('删除存在的文件 → ok:true，文件消失', async () => {
+    await fs.writeFile(path.join(rootDir, 'a.txt'), 'x', 'utf8');
+    const r = await deleteFile.execute({ path: 'a.txt' }, ctx());
+    expect(r.ok).toBe(true);
+    await expect(fs.access(path.join(rootDir, 'a.txt'))).rejects.toBeTruthy();
+  });
+
+  it('删除空目录 → ok:true', async () => {
+    await fs.mkdir(path.join(rootDir, 'empty'));
+    const r = await deleteFile.execute({ path: 'empty' }, ctx());
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.content).toMatch(/空目录/);
+  });
+
+  it('删除非空目录 → ok:false（不递归删整树），目录仍在', async () => {
+    await fs.mkdir(path.join(rootDir, 'dir'));
+    await fs.writeFile(path.join(rootDir, 'dir', 'inner.txt'), 'y', 'utf8');
+    const r = await deleteFile.execute({ path: 'dir' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/非空目录/);
+    // 副作用未发生：子文件仍在。
+    await expect(fs.access(path.join(rootDir, 'dir', 'inner.txt'))).resolves.toBeUndefined();
+  });
+
+  it('删除不存在的文件 → ok:false', async () => {
+    const r = await deleteFile.execute({ path: 'nope.txt' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/不存在/);
+  });
+
+  it('用 ../ 逃逸根 → ok:false（越界拒绝）', async () => {
+    const r = await deleteFile.execute({ path: '../escape.txt' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/越界/);
+  });
+
+  it('绝对路径逃逸根 → ok:false', async () => {
+    const r = await deleteFile.execute({ path: '/etc/hosts' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/越界/);
+  });
+});
+
+describe('move_file（Phase-10 T1）', () => {
+  it('重命名文件 → ok:true，源消失目标出现', async () => {
+    await fs.writeFile(path.join(rootDir, 'old.txt'), 'data', 'utf8');
+    const r = await moveFile.execute({ from: 'old.txt', to: 'new.txt' }, ctx());
+    expect(r.ok).toBe(true);
+    await expect(fs.access(path.join(rootDir, 'old.txt'))).rejects.toBeTruthy();
+    expect(await fs.readFile(path.join(rootDir, 'new.txt'), 'utf8')).toBe('data');
+  });
+
+  it('移动到不存在的子目录 → 自动建父目录', async () => {
+    await fs.writeFile(path.join(rootDir, 'f.txt'), 'data', 'utf8');
+    const r = await moveFile.execute({ from: 'f.txt', to: 'sub/deep/f.txt' }, ctx());
+    expect(r.ok).toBe(true);
+    expect(await fs.readFile(path.join(rootDir, 'sub', 'deep', 'f.txt'), 'utf8')).toBe('data');
+  });
+
+  it('目标已存在 → ok:false（不覆盖），目标内容不变', async () => {
+    await fs.writeFile(path.join(rootDir, 'src.txt'), 'src', 'utf8');
+    await fs.writeFile(path.join(rootDir, 'dst.txt'), 'dst', 'utf8');
+    const r = await moveFile.execute({ from: 'src.txt', to: 'dst.txt' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/已存在/);
+    // 副作用未发生：目标仍是原内容，源仍在。
+    expect(await fs.readFile(path.join(rootDir, 'dst.txt'), 'utf8')).toBe('dst');
+    await expect(fs.access(path.join(rootDir, 'src.txt'))).resolves.toBeUndefined();
+  });
+
+  it('源不存在 → ok:false', async () => {
+    const r = await moveFile.execute({ from: 'ghost.txt', to: 'x.txt' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/源.*不存在/);
+  });
+
+  it('源越界 → ok:false', async () => {
+    const r = await moveFile.execute({ from: '../x.txt', to: 'y.txt' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/越界/);
+  });
+
+  it('目标越界 → ok:false', async () => {
+    await fs.writeFile(path.join(rootDir, 'in.txt'), 'd', 'utf8');
+    const r = await moveFile.execute({ from: 'in.txt', to: '../out.txt' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/越界/);
+    // 源未被移动。
+    await expect(fs.access(path.join(rootDir, 'in.txt'))).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase-10 T2：形参校验（malformed-args）—— 缺必填 / 类型错 → ok:false 且不执行副作用
+// ---------------------------------------------------------------------------
+describe('形参校验（Phase-10 T2 malformed-args）', () => {
+  it('read_file 缺 path → ok:false（参数无效）', async () => {
+    const r = await readFile.execute({}, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/path 缺失/);
+  });
+
+  it('read_file path 传 number → ok:false（类型应为 string）', async () => {
+    const r = await readFile.execute({ path: 123 }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/path 类型应为 string/);
+  });
+
+  it('write_file content 非字符串 → ok:false 且不写文件', async () => {
+    const r = await writeFile.execute({ path: 'bad.txt', content: 42 }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/content 类型应为 string/);
+    await expect(fs.access(path.join(rootDir, 'bad.txt'))).rejects.toBeTruthy();
+  });
+
+  it('edit_file 缺 old_string → ok:false', async () => {
+    await fs.writeFile(path.join(rootDir, 'e.txt'), 'hello', 'utf8');
+    const r = await editFile.execute({ path: 'e.txt', new_string: 'x' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/old_string 缺失/);
+  });
+
+  it('delete_file path 传 number → ok:false', async () => {
+    const r = await deleteFile.execute({ path: 7 }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/path 类型应为 string/);
+  });
+
+  it('move_file 缺 to → ok:false 且不移动源', async () => {
+    await fs.writeFile(path.join(rootDir, 's.txt'), 'd', 'utf8');
+    const r = await moveFile.execute({ from: 's.txt' }, ctx());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/to 缺失/);
+    await expect(fs.access(path.join(rootDir, 's.txt'))).resolves.toBeUndefined();
   });
 });

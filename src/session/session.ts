@@ -44,19 +44,76 @@ export interface Summarizer {
 export const SUMMARY_PREFIX = '[此前对话摘要]\n';
 export const DEFAULT_MEMORY_THRESHOLD_MSGS = 40;
 export const DEFAULT_MEMORY_KEEP_RECENT = 16;
+/** Phase-9 M2：token 预算默认值（与 config.md 一致）。 */
+export const DEFAULT_MEMORY_THRESHOLD_TOKENS = 24000;
+export const DEFAULT_MEMORY_KEEP_RECENT_TOKENS = 8000;
 /** Phase-6 LH7：resume 日志大小硬上限（超过明确报错，不全量读入内存）。 */
 export const MAX_RESUME_BYTES = 8 * 1024 * 1024;
 
-/** 默认本地摘要器：确定性、无网络依赖，供实时 Loop 自动压缩使用。 */
+/**
+ * 单条消息的 token 估算（Phase-9 M2）：确定性近似，无需真实 tokenizer。
+ * 规则：正文 chars/4，外加工具名 + 参数 JSON 长度的同等估算（工具调用/结果也吃 token）。
+ * 仅用于「触发压缩」与「按预算保留近窗」的相对判据，不要求与真实计费严格一致。
+ * 导出供测试与 maybeCompact 共用。
+ */
+export function estimateTokens(msg: Message): number {
+  let chars = 0;
+  switch (msg.role) {
+    case 'system':
+    case 'user':
+      chars += msg.content.length;
+      break;
+    case 'assistant':
+      chars += msg.content.length;
+      for (const call of msg.toolCalls ?? []) {
+        chars += call.name.length;
+        try {
+          chars += JSON.stringify(call.args ?? {}).length;
+        } catch {
+          // 参数不可序列化（极端情况）：给个保守常量，避免估算为 0。
+          chars += 16;
+        }
+      }
+      break;
+    case 'tool':
+      chars += msg.content.length + msg.toolCallId.length;
+      break;
+  }
+  // 每条至少计 1 token（避免空消息被估为 0 导致预算判断失真）。
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
+/** 估算一组消息的累计 token。 */
+export function estimateTokensTotal(messages: Message[]): number {
+  let sum = 0;
+  for (const m of messages) sum += estimateTokens(m);
+  return sum;
+}
+
+/**
+ * 默认本地摘要器：确定性、无网络依赖，供实时 Loop 自动压缩使用。
+ * Phase-9 M4 增强：除消息计数 / 用户意图 / 工具列表外，额外保留高价值信息——
+ *   ① 失败的工具结果（错误片段，截断）；② 最近成功的关键工具结果摘要；
+ *   ③ 最后 2 条 assistant 推理要点；避免压缩把代码变更 / 决策 / 错误一并丢失。
+ * 若 older 含「[需融合的既有摘要]」前缀的 system（来自 maybeCompact 融合），原样并入摘要顶部。
+ */
 export class HeuristicSummarizer implements Summarizer {
   async summarize(older: Message[], signal: AbortSignal): Promise<string> {
     if (signal.aborted) throw new Error('memory compaction aborted');
     const counts = countRoles(older);
+
+    // 既有摘要融合输入（maybeCompact 用 system 注入）——保留以维持「不丢历史摘要」。
+    const priorSummary = older
+      .filter((m) => m.role === 'system' && m.content.startsWith('[需融合的既有摘要]'))
+      .map((m) => oneLine(m.content.replace(/^\[需融合的既有摘要\]\n?/, ''), 200))
+      .join(' ');
+
     const userNotes = older
       .filter((m) => m.role === 'user')
       .map((m) => oneLine(m.content))
       .filter(Boolean)
       .slice(-3);
+
     const toolNotes = older
       .flatMap((m) =>
         m.role === 'assistant'
@@ -64,10 +121,35 @@ export class HeuristicSummarizer implements Summarizer {
           : [],
       )
       .slice(-5);
+
+    // 错误片段：失败的工具结果（错误即数据，最该留）。
+    const errorNotes = older
+      .filter((m): m is Extract<Message, { role: 'tool' }> => m.role === 'tool' && !m.ok)
+      .map((m) => oneLine(m.content, 120))
+      .filter(Boolean)
+      .slice(-3);
+
+    // 关键工具结果：成功的工具产出要点（写文件 / 命令输出等）。
+    const okToolNotes = older
+      .filter((m): m is Extract<Message, { role: 'tool' }> => m.role === 'tool' && m.ok)
+      .map((m) => oneLine(m.content, 100))
+      .filter(Boolean)
+      .slice(-3);
+
+    // 最后 2 条 assistant 推理要点（带文本的）。
+    const lastAssistant = older
+      .filter((m): m is Extract<Message, { role: 'assistant' }> => m.role === 'assistant' && !!m.content)
+      .map((m) => oneLine(m.content, 120))
+      .slice(-2);
+
     return [
-      `压缩了 ${older.length} 条旧消息：user ${counts.user}，assistant ${counts.assistant}，tool ${counts.tool}。`,
+      priorSummary ? `融合既有摘要：${priorSummary}` : '',
+      `压缩了 ${older.filter((m) => m.role !== 'system' || !m.content.startsWith('[需融合的既有摘要]')).length} 条旧消息：user ${counts.user}，assistant ${counts.assistant}，tool ${counts.tool}。`,
       userNotes.length ? `近期用户意图：${userNotes.join(' / ')}` : '',
       toolNotes.length ? `涉及工具：${toolNotes.join(', ')}` : '',
+      okToolNotes.length ? `关键工具结果：${okToolNotes.join(' | ')}` : '',
+      errorNotes.length ? `错误片段：${errorNotes.join(' | ')}` : '',
+      lastAssistant.length ? `最后推理：${lastAssistant.join(' / ')}` : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -258,11 +340,18 @@ export class Session {
           });
           break;
         case 'summary': {
-          // 恢复压缩状态：把「前导 system 之后的 replaced 条旧消息」替换为摘要 system 消息（不丢摘要）。
+          // 恢复压缩状态：把「前导真实 system 之后的 replaced 条旧消息」替换为摘要 system 消息（不丢摘要）。
+          // 与 maybeCompact 一致：前导若是上一轮的 SUMMARY_PREFIX 摘要，不计入保留前缀——
+          //   它属于被替换区段（融合），保证 replaced 计数与 splice 位置精确对齐。
           const replaced = Number(p.replaced ?? 0);
           const summary = String(p.summary ?? '');
           let sysCount = 0;
-          while (sysCount < rebuilt.length && rebuilt[sysCount].role === 'system') sysCount++;
+          while (
+            sysCount < rebuilt.length &&
+            rebuilt[sysCount].role === 'system' &&
+            !(rebuilt[sysCount] as { content: string }).content.startsWith(SUMMARY_PREFIX)
+          )
+            sysCount++;
           const summaryMsg: Message = { role: 'system', content: SUMMARY_PREFIX + summary };
           rebuilt.splice(sysCount, replaced, summaryMsg);
           break;
@@ -297,39 +386,89 @@ export class Session {
 
   /**
    * 上下文压缩：历史超阈值时，把较旧消息摘要为一条 system 消息，保留 system 头与近窗。
-   * 不变量（memory.md A1-A3）：
+   * 不变量（memory.md A1-A3 + Phase-9 M2/M3）：
    * - 不破坏 tool 配对：把切点回退到非 tool 消息，保证每个 tool_result 与其 assistant 同侧。
    * - system 永远在前：被压缩的是「前导 system 之后、近窗之前」的区段；摘要也以 system 注入头部。
-   * - 近窗保真：最后 keepRecent 条原样保留（实际可能更多，keepRecent 为下限）。
+   * - 近窗保真：默认按 keepRecent 条数保留；提供 keepRecentTokens 时按 token 预算保留近窗。
+   * - 触发判据（向后兼容 + 叠加）：消息数 > thresholdMsgs **或** 估算 token > thresholdTokens（任一即触发）。
+   *   未提供 token 预算 → 仅按消息数判据（与旧行为一致）。
+   * - 防堆叠（M3）：被压缩区段若已含一条 SUMMARY_PREFIX 旧摘要，则把它从 older 中剔除、
+   *   作为「旧摘要」一并交给摘要器融合重写，使历史中摘要 system 消息数 ≤ 2（融合后通常收敛为 1）。
    * 阈值未到 / 无可压缩区段 → no-op。
    */
   async maybeCompact(opts: {
     thresholdMsgs: number;
     keepRecent: number;
+    thresholdTokens?: number;
+    keepRecentTokens?: number;
     summarizer: Summarizer;
     signal?: AbortSignal;
   }): Promise<{ compacted: boolean; summary?: string }> {
-    const { thresholdMsgs, keepRecent, summarizer } = opts;
+    const { thresholdMsgs, keepRecent, thresholdTokens, keepRecentTokens, summarizer } = opts;
     const signal = opts.signal ?? new AbortController().signal;
     const h = this.history;
-    if (h.length <= thresholdMsgs) return { compacted: false };
 
-    // 前导 system 区段始终保留。
+    // ── 触发判据：消息数 或 token 预算，任一超限即触发（M2 向后兼容）──────────
+    const overMsgs = h.length > thresholdMsgs;
+    const overTokens =
+      typeof thresholdTokens === 'number' && estimateTokensTotal(h) > thresholdTokens;
+    if (!overMsgs && !overTokens) return { compacted: false };
+
+    // 前导「真实 system」区段始终保留（系统提示等）。
+    // 注意（M3 防堆叠）：前导若是上一轮注入的 SUMMARY_PREFIX 摘要，**不**计入保留前缀——
+    //   它要落进被压缩区段以便与新摘要融合，避免历史里摘要 system 线性堆叠。
     let sysCount = 0;
-    while (sysCount < h.length && h[sysCount].role === 'system') sysCount++;
+    while (
+      sysCount < h.length &&
+      h[sysCount].role === 'system' &&
+      !(h[sysCount] as { content: string }).content.startsWith(SUMMARY_PREFIX)
+    )
+      sysCount++;
 
-    // 近窗起点；回退到非 tool 消息，避免把 tool_result 与其 assistant 切到两侧。
-    let boundary = h.length - keepRecent;
+    // ── 近窗起点：默认按条数；提供 keepRecentTokens 时按 token 预算回推 ────────
+    let boundary: number;
+    if (typeof keepRecentTokens === 'number') {
+      boundary = h.length;
+      let acc = 0;
+      while (boundary > sysCount) {
+        const next = acc + estimateTokens(h[boundary - 1]);
+        if (next > keepRecentTokens) break;
+        acc = next;
+        boundary--;
+      }
+    } else {
+      boundary = h.length - keepRecent;
+    }
+    // 回退到非 tool 消息，避免把 tool_result 与其 assistant 切到两侧。
     while (boundary > sysCount && h[boundary]?.role === 'tool') boundary--;
     if (boundary <= sysCount) return { compacted: false };
 
-    const older = h.slice(sysCount, boundary);
-    if (older.length === 0) return { compacted: false };
+    // ── 防堆叠融合（M3）：从被压缩区段剥离已有的旧摘要，单独交给摘要器融合 ─────
+    const segment = h.slice(sysCount, boundary);
+    const older = segment.filter(
+      (m) => !(m.role === 'system' && m.content.startsWith(SUMMARY_PREFIX)),
+    );
+    const priorSummaries = segment
+      .filter((m) => m.role === 'system' && m.content.startsWith(SUMMARY_PREFIX))
+      .map((m) => m.content.slice(SUMMARY_PREFIX.length));
+    if (older.length === 0 && priorSummaries.length === 0) return { compacted: false };
 
-    const summary = await summarizer.summarize(older, signal);
+    // 融合：把旧摘要拼到 older 之前作为一条 system 上下文，让摘要器重写为单条。
+    const toSummarize: Message[] = priorSummaries.length
+      ? [
+          {
+            role: 'system',
+            content: `[需融合的既有摘要]\n${priorSummaries.join('\n---\n')}`,
+          },
+          ...older,
+        ]
+      : older;
+
+    const summary = await summarizer.summarize(toSummarize, signal);
     const summaryMsg: Message = { role: 'system', content: SUMMARY_PREFIX + summary };
     this.history = [...h.slice(0, sysCount), summaryMsg, ...h.slice(boundary)];
-    this.writeLog('summary', { summary, replaced: older.length });
+    // replaced 记被替换的整段（含旧摘要），保证 resume 能精确还原压缩态。
+    this.writeLog('summary', { summary, replaced: segment.length });
     return { compacted: true, summary };
   }
 

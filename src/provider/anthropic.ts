@@ -255,8 +255,49 @@ export function mapSSEEvent(
 /** 标记不应重试的错误（鉴权/请求格式类 4xx）。 */
 class NonRetryableError extends Error {}
 
+/**
+ * 流读取超时错误（Phase-9 P1）：响应头已到、但后续相邻字节间隔超过 timeoutMs。
+ * 等价于一次半开连接超时，按「可重试」处理（与首字节超时同语义）。
+ */
+class StreamTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`流读取超时（${timeoutMs}ms 内无新数据）`);
+    this.name = 'StreamTimeoutError';
+  }
+}
+
 function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
+}
+
+/**
+ * 错误分类（Phase-9 P2）：判定一个 `send()` / 流读取阶段抛出的错误是否可重试。
+ * - 用户主动 abort（外部 signal 已 aborted）：不可重试（这是预期中断，不该重试）。
+ * - 网络层错误（ECONNREFUSED/ETIMEDOUT/ENOTFOUND/EAI_AGAIN/"fetch failed"）：可重试。
+ * - 流读取 idle 超时（StreamTimeoutError，等价超时）：可重试。
+ * - NonRetryableError（4xx 鉴权/格式）：不可重试。
+ * 判定依据错误的 code/cause/文案，而非单点字符串硬匹配。
+ */
+const RETRYABLE_NET_CODES = new Set([
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+
+function isRetryableNetworkError(err: unknown, outer: AbortSignal): boolean {
+  // 用户主动中断：不重试。
+  if (outer.aborted) return false;
+  if (err instanceof NonRetryableError) return false;
+  // 内部流读取 idle 超时：等价一次超时，重试。
+  if (err instanceof StreamTimeoutError) return true;
+
+  const e = err as { code?: string; cause?: { code?: string }; message?: string };
+  const code = e?.code ?? e?.cause?.code;
+  if (code && RETRYABLE_NET_CODES.has(code)) return true;
+  const msg = (e?.message ?? '').toLowerCase();
+  if (msg.includes('fetch failed')) return true;
+  return false;
 }
 
 async function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -295,9 +336,22 @@ export class AnthropicProvider implements Provider {
     const body = toAnthropicBody(req, this.maxTokens);
     let attempt = 0;
 
-    // 退避重试外层：只在「发起请求 / 拿到响应头」阶段重试；流一旦开始读则不再重试（避免重复事件）。
+    // 退避重试外层：覆盖「发起请求 → 拿到响应头 → 开始读流之前」整个阶段。
+    // 注意：流一旦开始 yield 事件，就不再重试（避免向上游重复发事件）；
+    //   但「拿响应头 / 第一次读取前」抛出的网络错误（含流读取 idle 超时）仍纳入重试。
     for (;;) {
-      const res = await this.send(body, req.signal);
+      // ── send 阶段：网络错误 / 首字节超时 在此抛出，需纳入重试（Phase-9 P2）──
+      let res: Response;
+      try {
+        res = await this.send(body, req.signal);
+      } catch (err) {
+        if (isRetryableNetworkError(err, req.signal) && attempt < this.maxRetries) {
+          attempt++;
+          await sleep(backoffMs(attempt), req.signal);
+          continue;
+        }
+        throw err;
+      }
 
       if (!res.ok) {
         const status = res.status;
@@ -319,7 +373,7 @@ export class AnthropicProvider implements Provider {
         throw new Error('Anthropic 响应无 body（无法读取 SSE 流）');
       }
 
-      yield* this.readSSE(res.body);
+      yield* this.readSSE(res.body, req.signal);
       return;
     }
   }
@@ -356,9 +410,15 @@ export class AnthropicProvider implements Provider {
     }
   }
 
-  /** 读取 SSE 字节流，按行拆 event/data，组装后交给 mapSSEEvent。 */
+  /**
+   * 读取 SSE 字节流，按行拆 event/data，组装后交给 mapSSEEvent。
+   * Phase-9 P1：每次 reader.read() 受 idle 超时保护——相邻两次字节到达间隔
+   *   超过 timeoutMs 视为半开连接，abort reader 并抛 StreamTimeoutError；
+   *   外部 signal abort 同样终止读取。计时器在每次成功读取后重置（idle 语义）。
+   */
   private async *readSSE(
     stream: ReadableStream<Uint8Array>,
+    outer: AbortSignal,
   ): AsyncIterable<ProviderEvent> {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -367,7 +427,7 @@ export class AnthropicProvider implements Provider {
 
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        const { done, value } = await this.readWithIdleTimeout(reader, outer);
         if (done) break;
         buf += decoder.decode(value, { stream: true });
 
@@ -393,6 +453,49 @@ export class AnthropicProvider implements Provider {
       }
     } finally {
       reader.releaseLock();
+    }
+  }
+
+  /**
+   * 单次 reader.read() 加 idle 超时与外部 signal 联动（Phase-9 P1）。
+   * - timeoutMs 内 read() 未 settle → cancel reader 并抛 StreamTimeoutError。
+   * - 外部 signal 在等待期间 abort → cancel reader 并抛 abort 原因。
+   * - read() 正常返回 → 清理计时器与监听器，把结果交回调用方（计时器随每次调用重建，即 idle 重置）。
+   */
+  private async readWithIdleTimeout(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    outer: AbortSignal,
+  ): Promise<ReadableStreamReadResult<Uint8Array>> {
+    if (outer.aborted) {
+      // 等待前已中断：取消底层流并抛出中断原因。
+      await reader.cancel(outer.reason).catch(() => {});
+      throw outer.reason ?? new Error('aborted');
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+
+    const guard = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const err = new StreamTimeoutError(this.timeoutMs);
+        // 先 reject 赢得 race（避免 cancel 让 pending 的 read() 以 done:true 抢先 settle），
+        // 再 cancel reader 释放底层连接，不再永久挂起。
+        reject(err);
+        reader.cancel(err).catch(() => {});
+      }, this.timeoutMs);
+      onAbort = () => {
+        const reason = outer.reason ?? new Error('aborted');
+        reject(reason);
+        reader.cancel(reason).catch(() => {});
+      };
+      outer.addEventListener('abort', onAbort, { once: true });
+    });
+
+    try {
+      return await Promise.race([reader.read(), guard]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) outer.removeEventListener('abort', onAbort);
     }
   }
 }

@@ -18,6 +18,7 @@ import {
   Session,
   SUMMARY_PREFIX,
   createHeuristicSummarizer,
+  estimateTokens,
   type Summarizer,
 } from '../src/session/index.js';
 import type { Message } from '../src/core/types.js';
@@ -205,6 +206,124 @@ describe('Session.maybeCompact —— 上下文压缩', () => {
         expect(hasCaller).toBe(true);
       }
     }
+  });
+});
+
+describe('estimateTokens / Token 预算压缩（A13 / M2）', () => {
+  it('estimateTokens：长消息估算更大；工具调用计入参数', () => {
+    const short = estimateTokens({ role: 'user', content: 'hi' });
+    const long = estimateTokens({ role: 'user', content: 'x'.repeat(400) });
+    expect(long).toBeGreaterThan(short);
+    const withTool = estimateTokens({
+      role: 'assistant',
+      content: '',
+      toolCalls: [{ id: 'c', name: 'write_file', args: { path: 'a', body: 'y'.repeat(200) } }],
+    });
+    expect(withTool).toBeGreaterThan(10);
+  });
+
+  it('A13：多条短消息但 token 少 → 不触发 token 压缩（消息数阈值也很高）', async () => {
+    const s = new Session({ rootDir, id: 'tok-noop' });
+    s.append({ role: 'system', content: 'SYS' });
+    for (let i = 0; i < 20; i++) s.append({ role: 'user', content: `u${i}` }); // 短消息
+    const before = s.messages();
+    const res = await s.maybeCompact({
+      thresholdMsgs: 1000, // 消息数判据不触发
+      keepRecent: 4,
+      thresholdTokens: 100000, // token 判据也不触发
+      keepRecentTokens: 8000,
+      summarizer: mockSummarizer,
+    });
+    expect(res.compacted).toBe(false);
+    expect(s.messages()).toEqual(before);
+  });
+
+  it('A13：少量超大消息但 token 多 → 触发 token 压缩（消息数判据不触发）', async () => {
+    const s = new Session({ rootDir, id: 'tok-compact' });
+    s.append({ role: 'system', content: 'SYS' });
+    // 6 条超大消息（每条 ~2500 token），消息数远低于阈值，但 token 远超阈值。
+    for (let i = 0; i < 6; i++) s.append({ role: 'user', content: 'z'.repeat(10000) });
+    const res = await s.maybeCompact({
+      thresholdMsgs: 1000, // 消息数判据不触发
+      keepRecent: 2,
+      thresholdTokens: 5000, // token 判据触发
+      keepRecentTokens: 4000, // 近窗按 token 预算保留
+      summarizer: mockSummarizer,
+    });
+    expect(res.compacted).toBe(true);
+    const msgs = s.messages();
+    expect(msgs[0]).toEqual({ role: 'system', content: 'SYS' });
+    expect(msgs[1].role).toBe('system');
+    expect((msgs[1] as { content: string }).content.startsWith(SUMMARY_PREFIX)).toBe(true);
+  });
+
+  it('A13：未提供 token 预算时回落消息数阈值（向后兼容）', async () => {
+    const s = new Session({ rootDir, id: 'tok-fallback' });
+    s.append({ role: 'system', content: 'SYS' });
+    for (let i = 0; i < 5; i++) {
+      s.append({ role: 'user', content: `u${i}` });
+      s.append({ role: 'assistant', content: `a${i}` });
+    }
+    const res = await s.maybeCompact({
+      thresholdMsgs: 6,
+      keepRecent: 4,
+      summarizer: mockSummarizer,
+    });
+    expect(res.compacted).toBe(true);
+  });
+});
+
+describe('摘要增强 + 防堆叠（A14 / M3/M4）', () => {
+  it('A14：增强摘要含错误片段、关键工具结果、最后 assistant 推理', async () => {
+    const summarizer = createHeuristicSummarizer();
+    const summary = await summarizer.summarize(
+      [
+        { role: 'user', content: '跑测试' },
+        {
+          role: 'assistant',
+          content: '执行命令',
+          toolCalls: [{ id: 'c1', name: 'run_shell', args: { cmd: 'npm test' } }],
+        },
+        { role: 'tool', toolCallId: 'c1', content: 'Error: 2 tests failed at auth.test', ok: false },
+        {
+          role: 'assistant',
+          content: '我会修复 auth 模块的失败用例',
+          toolCalls: [{ id: 'c2', name: 'write_file', args: { path: 'auth.ts' } }],
+        },
+        { role: 'tool', toolCallId: 'c2', content: 'wrote 30 lines to auth.ts', ok: true },
+        { role: 'assistant', content: '修复完成，再次运行测试' },
+      ],
+      new AbortController().signal,
+    );
+    expect(summary).toContain('错误片段');
+    expect(summary).toContain('auth.test');
+    expect(summary).toContain('关键工具结果');
+    expect(summary).toContain('最后推理');
+    expect(summary).toContain('修复完成');
+  });
+
+  it('A14：多轮压缩后摘要 system 消息数 ≤ 2（融合不叠加）', async () => {
+    const s = new Session({ rootDir, id: 'fuse' });
+    s.append({ role: 'system', content: 'SYS' });
+    const summarizer = createHeuristicSummarizer();
+
+    const countSummaries = (): number =>
+      s
+        .messages()
+        .filter((m) => m.role === 'system' && m.content.startsWith(SUMMARY_PREFIX)).length;
+
+    // 反复 append + compact 多轮，每轮都应把旧摘要融合进新摘要而非并列堆叠。
+    for (let round = 0; round < 5; round++) {
+      for (let i = 0; i < 6; i++) {
+        s.append({ role: 'user', content: `r${round}-u${i}` });
+        s.append({ role: 'assistant', content: `r${round}-a${i}` });
+      }
+      await s.maybeCompact({ thresholdMsgs: 6, keepRecent: 4, summarizer });
+      expect(countSummaries()).toBeLessThanOrEqual(2);
+    }
+    // 收敛到 1 条融合摘要。
+    expect(countSummaries()).toBeLessThanOrEqual(2);
+    expect(s.memoryStats().hasSummary).toBe(true);
   });
 });
 

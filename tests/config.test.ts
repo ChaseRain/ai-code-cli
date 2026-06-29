@@ -71,6 +71,15 @@ describe('loadConfig — 默认值回落', () => {
       timeoutMs: 60000,
       maxTurns: 25,
       maxRetries: 2,
+      // Phase-9 M3：记忆配置默认值。
+      memory: {
+        enabled: true,
+        thresholdMsgs: 40,
+        keepRecent: 16,
+        thresholdTokens: 24000,
+        keepRecentTokens: 8000,
+        summarizer: 'heuristic',
+      },
     });
   });
 });
@@ -126,6 +135,73 @@ describe('loadConfig — 校验失败给出清晰错误且不崩溃', () => {
   it('baseURL 非 URL 被拒绝', () => {
     writeProjectConfig({ baseURL: 'not a url' });
     expect(() => load()).toThrowError(/baseURL/);
+  });
+});
+
+describe('记忆配置 memory（Phase-9 M3 / A16）', () => {
+  afterEach(() => {
+    delete process.env.AI_CODE_MEMORY_ENABLED;
+    delete process.env.AI_CODE_MEMORY_THRESHOLD;
+    delete process.env.AI_CODE_MEMORY_KEEP_RECENT;
+    delete process.env.AI_CODE_MEMORY_THRESHOLD_TOKENS;
+    delete process.env.AI_CODE_MEMORY_KEEP_RECENT_TOKENS;
+    delete process.env.AI_CODE_MEMORY_SUMMARIZER;
+  });
+
+  it('缺省回落记忆默认值', () => {
+    const { config } = load();
+    expect(config.memory).toEqual({
+      enabled: true,
+      thresholdMsgs: 40,
+      keepRecent: 16,
+      thresholdTokens: 24000,
+      keepRecentTokens: 8000,
+      summarizer: 'heuristic',
+    });
+  });
+
+  it('memory 子字段：项目级覆盖用户级，未覆盖子字段保留下层（深合并）', () => {
+    writeUserConfig({ memory: { thresholdMsgs: 30, summarizer: 'llm', keepRecent: 8 } });
+    writeProjectConfig({ memory: { thresholdMsgs: 50 } });
+    const { config } = load();
+    // 项目级覆盖
+    expect(config.memory.thresholdMsgs).toBe(50);
+    // 用户级独有、项目级未写 → 保留用户级
+    expect(config.memory.summarizer).toBe('llm');
+    expect(config.memory.keepRecent).toBe(8);
+    // 两层都没写 → 默认值
+    expect(config.memory.thresholdTokens).toBe(24000);
+    expect(config.memory.enabled).toBe(true);
+  });
+
+  it('AI_CODE_MEMORY_* 覆盖文件配置', () => {
+    writeProjectConfig({ memory: { thresholdMsgs: 50, summarizer: 'heuristic' } });
+    process.env.AI_CODE_MEMORY_THRESHOLD = '12';
+    process.env.AI_CODE_MEMORY_THRESHOLD_TOKENS = '9000';
+    process.env.AI_CODE_MEMORY_SUMMARIZER = 'auto';
+    process.env.AI_CODE_MEMORY_ENABLED = 'false';
+    const { config } = load();
+    expect(config.memory.thresholdMsgs).toBe(12);
+    expect(config.memory.thresholdTokens).toBe(9000);
+    expect(config.memory.summarizer).toBe('auto');
+    expect(config.memory.enabled).toBe(false);
+    // 未被 env 覆盖的字段保留文件 / 默认
+    expect(config.memory.keepRecent).toBe(16);
+  });
+
+  it('非法 summarizer 枚举报错并指出字段', () => {
+    writeProjectConfig({ memory: { summarizer: 'gpt' } });
+    expect(() => load()).toThrow(/summarizer/);
+  });
+
+  it('memory 数值超上限报错并指出字段', () => {
+    writeProjectConfig({ memory: { thresholdTokens: 99_999_999 } });
+    expect(() => load()).toThrow(/thresholdTokens/);
+  });
+
+  it('env 非法值（summarizer）经校验报错', () => {
+    process.env.AI_CODE_MEMORY_SUMMARIZER = 'bad-kind';
+    expect(() => load()).toThrow(/summarizer/);
   });
 });
 

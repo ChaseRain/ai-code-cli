@@ -14,6 +14,16 @@ import type { Config } from '../core/types.js';
 // 默认值（与 config.md「字段」一节一致）
 // ============================================================================
 
+/** 记忆配置默认值（Phase-9 M3，与 config.md / memory.md 一致）。 */
+const MEMORY_DEFAULTS: Config['memory'] = {
+  enabled: true,
+  thresholdMsgs: 40,
+  keepRecent: 16,
+  thresholdTokens: 24000,
+  keepRecentTokens: 8000,
+  summarizer: 'heuristic',
+};
+
 const DEFAULTS: Config = {
   provider: 'anthropic',
   model: 'deepseek/deepseek-v4-pro',
@@ -21,6 +31,7 @@ const DEFAULTS: Config = {
   timeoutMs: 60000,
   maxTurns: 25,
   maxRetries: 2,
+  memory: MEMORY_DEFAULTS,
 };
 
 // ============================================================================
@@ -28,6 +39,30 @@ const DEFAULTS: Config = {
 // 全部字段可缺省（缺失回落默认值），但出现时必须类型/取值正确。
 // .strict() 用于拒绝未知字段，给出清晰错误而非静默吞掉拼写错误。
 // ============================================================================
+
+/**
+ * 记忆配置 schema（Phase-9 M3）。所有子字段可缺省（缺省回落 MEMORY_DEFAULTS），
+ * 出现时必须类型/取值正确并设硬上限（防 Loop / 压缩失控，与现有 .max() 风格一致）。
+ * 终态用 .strict()；终态 memory 整体经 .default() 补齐为完整对象。
+ */
+const MemorySchema = z
+  .object({
+    enabled: z.boolean(),
+    thresholdMsgs: z.number().int().positive().max(2000, 'memory.thresholdMsgs 不能超过 2000'),
+    keepRecent: z.number().int().positive().max(2000, 'memory.keepRecent 不能超过 2000'),
+    thresholdTokens: z
+      .number()
+      .int()
+      .positive()
+      .max(1_000_000, 'memory.thresholdTokens 不能超过 1000000'),
+    keepRecentTokens: z
+      .number()
+      .int()
+      .positive()
+      .max(1_000_000, 'memory.keepRecentTokens 不能超过 1000000'),
+    summarizer: z.enum(['heuristic', 'llm', 'auto']),
+  })
+  .strict();
 
 const ConfigSchema = z
   .object({
@@ -38,12 +73,17 @@ const ConfigSchema = z
     timeoutMs: z.number().int().positive().max(120000, 'timeoutMs 不能超过 120000（120s）'),
     maxTurns: z.number().int().positive().max(50, 'maxTurns 不能超过 50'),
     maxRetries: z.number().int().nonnegative().max(5, 'maxRetries 不能超过 5'),
+    memory: MemorySchema,
   })
   .strict();
 
-/** 来自文件的「部分配置」：每个字段都可缺省，apiKey 作为兜底密钥被单独剥离。 */
+/**
+ * 来自文件的「部分配置」：每个字段都可缺省，apiKey 作为兜底密钥被单独剥离。
+ * memory 子字段亦可逐项缺省（深合并：未写子字段保留下层值），故用 MemorySchema.partial()。
+ */
 const PartialFileSchema = ConfigSchema.partial()
   .extend({
+    memory: MemorySchema.partial().strict().optional(),
     // 允许配置文件写 apiKey 作为兜底，但它不进入 Config，仅用于密钥解析。
     apiKey: z.string().optional(),
   })
@@ -144,6 +184,44 @@ export function redactSecret(_secret: string | undefined): string {
 }
 
 // ============================================================================
+// 记忆配置环境变量覆盖（Phase-9 M3）—— 优先级高于文件配置。
+// 仅覆盖「已设置且非空」的变量；非法值留给后续 zod 校验报错（不静默吞）。
+// ============================================================================
+
+/** 把字符串解析为整数；非整数返回 NaN（交给 zod 报错）。 */
+function parseIntEnv(v: string): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** 把字符串解析为布尔：'true'/'1' → true，'false'/'0' → false，其它原样返回（交给 zod 报错）。 */
+function parseBoolEnv(v: string): boolean | string {
+  const s = v.trim().toLowerCase();
+  if (s === 'true' || s === '1') return true;
+  if (s === 'false' || s === '0') return false;
+  return v;
+}
+
+/**
+ * 应用 AI_CODE_MEMORY_* 环境变量覆盖。返回新对象（不改入参）。
+ * 覆盖后的值仍需经 ConfigSchema 校验（含上限 / 枚举），非法值会报错并指出字段。
+ */
+function applyMemoryEnvOverrides(memory: Partial<Config['memory']>): Config['memory'] {
+  const out = { ...memory } as Record<string, unknown>;
+  const env = process.env;
+  if (env.AI_CODE_MEMORY_ENABLED) out.enabled = parseBoolEnv(env.AI_CODE_MEMORY_ENABLED);
+  if (env.AI_CODE_MEMORY_THRESHOLD) out.thresholdMsgs = parseIntEnv(env.AI_CODE_MEMORY_THRESHOLD);
+  if (env.AI_CODE_MEMORY_KEEP_RECENT) out.keepRecent = parseIntEnv(env.AI_CODE_MEMORY_KEEP_RECENT);
+  if (env.AI_CODE_MEMORY_THRESHOLD_TOKENS)
+    out.thresholdTokens = parseIntEnv(env.AI_CODE_MEMORY_THRESHOLD_TOKENS);
+  if (env.AI_CODE_MEMORY_KEEP_RECENT_TOKENS)
+    out.keepRecentTokens = parseIntEnv(env.AI_CODE_MEMORY_KEEP_RECENT_TOKENS);
+  if (env.AI_CODE_MEMORY_SUMMARIZER) out.summarizer = env.AI_CODE_MEMORY_SUMMARIZER;
+  // 这里只做「字段覆盖」，类型正确性由后续 ConfigSchema 校验保证；故经 unknown 收敛。
+  return out as unknown as Config['memory'];
+}
+
+// ============================================================================
 // 公共入口
 // ============================================================================
 
@@ -182,12 +260,19 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   const projectFile = readConfigFile(projectConfigPath(cwd));
 
   // 剥离 apiKey：它不属于 Config，仅参与密钥解析。
-  const { apiKey: userApiKey, ...userConfig } = userFile;
-  const { apiKey: projectApiKey, ...projectConfig } = projectFile;
+  const { apiKey: userApiKey, memory: userMemory, ...userConfig } = userFile;
+  const { apiKey: projectApiKey, memory: projectMemory, ...projectConfig } = projectFile;
 
-  // 深合并：默认值 ← 用户级 ← 项目级。
+  // 深合并：默认值 ← 用户级 ← 项目级（顶层扁平字段）。
   let merged: Config = mergeLayer(DEFAULTS, userConfig);
   merged = mergeLayer(merged, projectConfig);
+
+  // memory 子对象单独深合并（逐子字段覆盖，未覆盖项保留下层值）。
+  let memory = mergeLayer(MEMORY_DEFAULTS, userMemory ?? {});
+  memory = mergeLayer(memory, projectMemory ?? {});
+  // 环境变量覆盖（优先级最高）。
+  memory = applyMemoryEnvOverrides(memory);
+  merged.memory = memory;
 
   // 终态再次完整校验（防御默认值漂移；同时把合并结果收敛到 Config 形态）。
   const result = ConfigSchema.safeParse(merged);

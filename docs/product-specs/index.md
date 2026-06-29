@@ -7,12 +7,12 @@
 | Spec | 功能域 | 评审维度 | 测试覆盖 | 状态 |
 |---|---|---|---|---|
 | [agent-loop.md](agent-loop.md) | Agent 主循环 | Agent Loop | ✅ 主循环 / maxTurns 终止 / 拒绝入上下文 | implemented |
-| [tools.md](tools.md) | 工具系统（7 文件/Shell + `update_plan`） | 工具系统 | ✅ 结果回传 / 路径越界 / edit 唯一性 / shell 退出码 | implemented |
+| [tools.md](tools.md) | 工具系统（9 文件/Shell + `update_plan`） | 工具系统 | ✅ 结果回传 / 路径越界 / edit 唯一性 / shell 退出码 / delete·move / malformed-args | implemented |
 | [permissions.md](permissions.md) | 权限控制 | 权限控制 | ✅ 只读自动 / 写类确认 / 拒绝入上下文 | implemented |
 | [provider.md](provider.md) | LLM Provider（**Anthropic Messages** + Mock） | LLM Provider | ✅ Mock Provider / SSE 解析 / 超时·重试 | implemented |
 | [config.md](config.md) | 配置（用户级 + 项目级） | 配置管理 | ✅ 项目级优先 / 深合并 / 缺省回落 | implemented |
 | [session-context.md](session-context.md) | 会话上下文 + 持久化 | 会话上下文 | ✅ 全要素入历史 / jsonl 落盘 | implemented |
-| [tui.md](tui.md) | TUI + 内置命令 | TUI 交互体验 | ✅ 命令解析 + Ink render 冒烟（tests/tui-render.test.ts） | implemented |
+| [tui.md](tui.md) | TUI + 内置命令 | TUI 交互体验 | ✅ 命令解析 + Ink render 冒烟（tests/tui-render.test.ts）+ 命令执行（tests/command-executor.test.ts） | implemented |
 | [memory.md](memory.md) | 记忆增强（resume / 压缩 / summary） | 扩展（加分） | ✅ resume + 命令 + Session 级压缩 + Loop 自动压缩（tests/memory.test.ts + tests/agent-loop.test.ts） | implemented |
 | [checkpoint.md](checkpoint.md) | Checkpoint / Restore | 扩展（第一梯队） | ✅ tests/checkpoint.test.ts + agent-loop auto hook + 命令解析/确认提示 | implemented |
 | [session-browser.md](session-browser.md) | Session Browser | 扩展（第一梯队） | ✅ tests/session-browser.test.ts + `/sessions` `/resume <id|latest>` 命令扩展 | implemented |
@@ -30,6 +30,12 @@
 | 权限确认与拒绝 | permissions.md | ✅ tests/permission.test.ts |
 | 配置优先级 | config.md | ✅ tests/config.test.ts |
 | Mock LLM Provider | provider.md（贯穿全部用例的驱动） | ✅ tests/provider.test.ts |
+| **（Phase-9）流读取超时 + 网络错误重试** | provider.md（P1/P2） | ⏳ tests/provider.test.ts（极慢 stream 触发 idle abort；ECONNREFUSED 首败二成；4xx 不重试） |
+| **（Phase-9）权限会话级 allowlist 重置** | permissions.md（P3） | ⏳ tests/permission.test.ts（`reset()` 后同工具重新提确认） |
+| **（Phase-9）记忆 LLM/token/融合/配置** | memory.md（M1-M5）+ config.md | ⏳ tests/memory.test.ts（LLM 降级、token 触发、融合摘要数 ≤ 2）+ tests/config.test.ts（memory 优先级 + env 覆盖） |
+| **（Phase-10 Q1）命令执行器** | tui.md（CommandExecutor） | ✅ tests/command-executor.test.ts（注入 fake deps，断言各命令 `CommandOutcome` 的 messages/effect，IO 失败收敛为 error） |
+| **（Phase-10 T1）delete_file / move_file** | tools.md（新增工具契约） | ✅ tests/tools.test.ts（删文件/删空目录成功；删非空目录·删不存在·move 目标已存在报错；源/目标越界拒绝） |
+| **（Phase-10 T2）malformed-args 形参校验** | tools.md（形参校验约定） | ✅ tests/tools.test.ts（缺必填/类型错 → `ok:false` 清晰错误且不执行副作用、不抛） |
 
 > 实测：基线 `npm test` 73/73；Round-2（2026-06-28）当前 `npm run build && npm test` = **91/91** 通过、`build` exit 0。完整验收记录见 [`../exec-plans/active/phase-1.md`](../exec-plans/active/phase-1.md)。
 > Round-3 第一梯队（Checkpoint/Restore + Session Browser + Diff/Git-aware，2026-06-28）当前 `npm run build && npm test` = **112/112** 通过、`build` exit 0。计划见 [`../exec-plans/active/phase-2.md`](../exec-plans/active/phase-2.md)。
@@ -39,3 +45,5 @@
 > Phase-6 稳定性/压测硬化（2026-06-28）第一批 LH1-LH4 + 第二批 LH5-LH7 全部完成，当前 `npm run build && npm test` = **148/148** 通过、`build` exit 0；压测 C1-C3 + D1-D3 达标。计划见 [`../exec-plans/active/phase-6.md`](../exec-plans/active/phase-6.md)。
 > Phase-7 Guardrails / 边界硬化（2026-06-28）P7-A~E（symlink 逃逸 / 文件大小上限 / 配置硬上限 / 进程树清理 / glob·grep pattern 逃逸）全部完成，当前 `npm run build && npm test` = **174/174** 通过、`build` exit 0；复现 P7-A~E 达标。计划见 [`../exec-plans/active/phase-7.md`](../exec-plans/active/phase-7.md)。
 > Phase-8 grep 资源与正则安全（2026-06-28）P8-A（stat-before-read 跳过过大文件）+ P8-B（拒绝 nested quantifier / 歧义 alternation ReDoS，含非捕获/命名捕获/一层包装/可选分支/字符类首 token 补洞）+ P8-C（语义原子 `\d`/`\w`/`\s`/`.`/否定类 + 一层分支 unwrap）完成，当前 `npm run build && npm test` = **213/213** 通过、`build` exit 0；复现 P8-A/B/C 达标。计划见 [`../exec-plans/active/phase-8.md`](../exec-plans/active/phase-8.md)。
+> Phase-9 评审 Loop Round-1（2026-06-29，docs-first 现行）可靠性补强 P1（SSE 流读取 idle 超时关联外部 signal）/ P2（网络错误分类重试：429/5xx/网络错误/非用户 AbortError 可重试，其他 4xx 不重试）/ P3（权限 `reset()`，`/clear` 重置会话级 allowlist）+ 头号加分「优异上下文压缩」M1（可注入 `LLMSummarizer` + 失败降级）/ M2（`estimateTokens` + token 预算压缩，消息数阈值向后兼容降级）/ M3（摘要保留错误·关键工具结果·末 2 条 assistant 推理 + 二次压缩融合，摘要数 ≤ 2 不变量）/ M4（`/clear` 重置计数、`/resume` 摘要桥接）/ M5（`config.memory` 配置化 + `AI_CODE_MEMORY_*` 覆盖）。受影响 spec：provider.md / permissions.md / memory.md / config.md。计划见 [`../exec-plans/active/phase-9.md`](../exec-plans/active/phase-9.md)。代码 + 测试已落地（2026-06-29）：当前 `npm run build && npm test` = **243/243** 通过、`build` exit 0（基线 213 + 新增 30：P1/P2 流读取超时与网络错误重试、P3 `reset()`、M1 `LLMSummarizer`/复合降级、M2 `estimateTokens`/token 预算压缩、M3 摘要增强 + 融合 ≤ 2、M3/M4 `/memory` 生效配置展示 + `/resume` 桥接、config `memory` 合并/env 覆盖/枚举与上限校验）。
+> Phase-10 评审 Loop Round-2（2026-06-29，docs-first 现行）工程质量自洽 + 工具系统补全：Q1（抽 `src/tui/command-executor.ts` 纯逻辑 `CommandExecutor`，命令 I/O + 状态查询从 App.tsx 下沉，App `submit` 只调执行器 + 据 `CommandOutcome`(echoUser/messages/effect) push 消息/触发副作用，命令执行路径首次获单测；`/resume` 无参改为打开会话选择器的主流约定）/ T1（新增 `delete_file`/`move_file`，文件/Shell 工具 7→9、敏感 3→5，复用 realpath 沙箱 + 权限确认）/ T2（新增 `validate-args.ts` 轻量统一形参校验：必填存在 + 基本类型，落在 read/write/edit/delete/move 入口，错误即数据）。受影响 spec：tui.md / tools.md。计划见 [`../exec-plans/active/phase-10.md`](../exec-plans/active/phase-10.md)。代码 + 测试已落地（2026-06-29）：当前 `npm run build && npm test` = **291/291** 通过、`build` exit 0（基线 243 + 新增 48：command-executor 30 + tools delete/move/malformed-args 18）。

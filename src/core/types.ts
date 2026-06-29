@@ -118,6 +118,24 @@ export interface Config {
   maxTurns: number;
   /** Provider 请求最大重试次数，默认 2 */
   maxRetries: number;
+  /** 记忆 / 上下文压缩配置（Phase-9 M3，见 config.md / memory.md），始终有默认值。 */
+  memory: MemoryConfig;
+}
+
+/** 记忆 / 上下文压缩配置（Phase-9 M3）。各字段均有默认值，合并后必填齐。 */
+export interface MemoryConfig {
+  /** 是否启用自动压缩，默认 true。 */
+  enabled: boolean;
+  /** 消息数触发阈值（向后兼容），默认 40。 */
+  thresholdMsgs: number;
+  /** 近窗保留条数（向后兼容），默认 16。 */
+  keepRecent: number;
+  /** token 预算触发阈值，默认 24000。 */
+  thresholdTokens: number;
+  /** 近窗保留 token 预算，默认 8000。 */
+  keepRecentTokens: number;
+  /** 摘要器类型：'heuristic'（默认）| 'llm' | 'auto'（失败降级 heuristic）。 */
+  summarizer: 'heuristic' | 'llm' | 'auto';
 }
 
 // ============================================================================

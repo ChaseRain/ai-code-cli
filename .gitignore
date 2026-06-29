@@ -5,6 +5,8 @@ dist/
 .env
 .env.*
 !.env.example
+# 项目级配置可能含 apiKey 兜底，忽略实际文件、保留模板与说明
+.ai-code-cli/config.json
 # logs/runtime (note: .ai_history/logs 需提交，不在此忽略)
 *.log
 .DS_Store

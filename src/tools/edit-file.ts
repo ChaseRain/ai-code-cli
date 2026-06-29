@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import type { Tool, ToolContext, ToolResult } from '../core/types.js';
 import { resolveInRoot, PathEscapeError } from './path-guard.js';
 import { MAX_TOOL_FILE_BYTES, humanBytes } from './limits.js';
+import { validateArgs } from './validate-args.js';
 
 interface EditFileArgs {
   /** 相对项目根的文件路径 */
@@ -42,10 +43,14 @@ export const editFile: Tool = {
     required: ['path', 'old_string', 'new_string'],
   },
   async execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
-    const { path: file, old_string, new_string } = (args ?? {}) as EditFileArgs;
-    if (!file) return { ok: false, error: 'edit_file 缺少参数：path' };
-    if (old_string === undefined) return { ok: false, error: 'edit_file 缺少参数：old_string' };
-    if (new_string === undefined) return { ok: false, error: 'edit_file 缺少参数：new_string' };
+    // T2：统一形参校验（path/old_string/new_string 均必填字符串）。
+    const bad = validateArgs('edit_file', args, [
+      { name: 'path', type: 'string' },
+      { name: 'old_string', type: 'string' },
+      { name: 'new_string', type: 'string' },
+    ]);
+    if (bad) return bad;
+    const { path: file, old_string, new_string } = (args ?? {}) as Required<EditFileArgs>;
     if (old_string === new_string) {
       return { ok: false, error: 'old_string 与 new_string 相同，无需编辑' };
     }

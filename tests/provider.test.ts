@@ -61,6 +61,20 @@ function streamResponse(chunks: string[], status = 200): Response {
   return new Response(body, { status });
 }
 
+/**
+ * 构造一个「半开」字节流：start 不 enqueue、pull 永不产出，reader.read() 永远 pending，
+ * 仅在被 cancel 时 resolve（释放底层 controller）。用于 P1 流读取超时测试，
+ * 不经 undici Response 包装（裸 ReadableStream 作 body），避免被提前 close。
+ */
+function hangingStream(): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    pull() {
+      // 故意什么都不做：永远不产出数据。
+      return new Promise<void>(() => {});
+    },
+  });
+}
+
 // ── 1. SSE 分片拼接出完整工具参数 ───────────────────────────────────────────
 
 describe('AnthropicProvider SSE 解析', () => {
@@ -292,6 +306,95 @@ describe('AnthropicProvider 错误处理', () => {
     });
     await expect(collect(provider.chat(makeReq()))).rejects.toThrow(/401/);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  // ── P1 流读取超时 ─────────────────────────────────────────────────────────
+
+  it('P1：响应头已到、流迟迟不产出 chunk → 在 timeoutMs 内抛流读取超时', async () => {
+    // 半开连接：响应头已到，reader.read() 永远 pending（永不 enqueue/close），直到被 cancel。
+    // 用裸 ReadableStream 作为 body（不经 undici Response 包装，避免被提前 close）。
+    const body = hangingStream();
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, body });
+    const provider = new AnthropicProvider({
+      baseURL: 'https://x.test/an',
+      apiKey: 'k',
+      timeoutMs: 30,
+      maxRetries: 0, // 不重试，直接观察超时抛出
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    // 不应永久挂起：在短 timeout 内抛「流读取超时」。
+    await expect(collect(provider.chat(makeReq()))).rejects.toThrow(/流读取超时/);
+  });
+
+  it('P1：外部 signal abort 能终止半开流读取', async () => {
+    const body = hangingStream();
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, body });
+    const provider = new AnthropicProvider({
+      baseURL: 'https://x.test/an',
+      apiKey: 'k',
+      timeoutMs: 5000, // 故意很长，确保终止来自外部 abort 而非 idle 超时
+      maxRetries: 0,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(new Error('用户中断')), 20);
+    await expect(collect(provider.chat(makeReq({ signal: ac.signal })))).rejects.toThrow();
+  });
+
+  // ── P2 网络层错误重试 ───────────────────────────────────────────────────────
+
+  it('P2：网络错误（ECONNREFUSED）首次失败、二次成功 → 整体重试后成功', async () => {
+    const ok = streamResponse([
+      sseFrame({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }) +
+        sseFrame({ type: 'message_stop' }),
+    ]);
+    const netErr = Object.assign(new Error('fetch failed'), {
+      cause: { code: 'ECONNREFUSED' },
+    });
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(netErr)
+      .mockResolvedValueOnce(ok);
+    const provider = new AnthropicProvider({
+      baseURL: 'https://x.test/an',
+      apiKey: 'k',
+      maxRetries: 2,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const events = await collect(provider.chat(makeReq()));
+    expect(fetchImpl).toHaveBeenCalledTimes(2); // 发生了一次重试
+    expect(events.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  });
+
+  it('P2：网络错误超过 maxRetries → 抛出', async () => {
+    const netErr = Object.assign(new Error('connect ECONNREFUSED'), {
+      code: 'ECONNREFUSED',
+    });
+    const fetchImpl = vi.fn().mockRejectedValue(netErr);
+    const provider = new AnthropicProvider({
+      baseURL: 'https://x.test/an',
+      apiKey: 'k',
+      maxRetries: 1,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(collect(provider.chat(makeReq()))).rejects.toThrow(/ECONNREFUSED/);
+    expect(fetchImpl).toHaveBeenCalledTimes(2); // 首次 + 1 次重试
+  });
+
+  it('P2：用户主动 abort 抛出的错误不重试', async () => {
+    const ac = new AbortController();
+    const fetchImpl = vi.fn((_url: string, init?: RequestInit) => {
+      ac.abort(new Error('用户中断'));
+      return Promise.reject(init?.signal?.reason ?? new Error('aborted'));
+    });
+    const provider = new AnthropicProvider({
+      baseURL: 'https://x.test/an',
+      apiKey: 'k',
+      maxRetries: 3,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(collect(provider.chat(makeReq({ signal: ac.signal })))).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // 不因 abort 而重试
   });
 
   it('超时触发 abort（fetch 收到已 abort 的 signal）', async () => {

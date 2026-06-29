@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { Tool, ToolContext, ToolResult } from '../core/types.js';
 import { resolveInRoot, PathEscapeError } from './path-guard.js';
 import { MAX_TOOL_FILE_BYTES, humanBytes } from './limits.js';
+import { validateArgs } from './validate-args.js';
 
 interface WriteFileArgs {
   /** 相对项目根的文件路径 */
@@ -27,9 +28,13 @@ export const writeFile: Tool = {
     required: ['path', 'content'],
   },
   async execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
-    const { path: file, content } = (args ?? {}) as WriteFileArgs;
-    if (!file) return { ok: false, error: 'write_file 缺少参数：path' };
-    if (content === undefined) return { ok: false, error: 'write_file 缺少参数：content' };
+    // T2：统一形参校验（path/content 均必填字符串）。
+    const bad = validateArgs('write_file', args, [
+      { name: 'path', type: 'string' },
+      { name: 'content', type: 'string' },
+    ]);
+    if (bad) return bad;
+    const { path: file, content } = (args ?? {}) as Required<WriteFileArgs>;
     // P7-B：写入内容字节上限。
     const bytes = Buffer.byteLength(content, 'utf8');
     if (bytes > MAX_TOOL_FILE_BYTES) {

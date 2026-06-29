@@ -55,6 +55,15 @@ export class Permission {
     }
     return decision;
   }
+
+  /**
+   * 重置会话级 allowlist（Phase-9 P3，见 permissions.md「会话级 allowlist 生命周期」）。
+   * 由 `/clear` 开启新会话时调用——清空后，此前「本会话始终允许」放行的敏感工具
+   * 须重新触发确认。只清 allowlist 内部状态，不影响只读自动放行 / 拒绝入上下文等其他策略。
+   */
+  reset(): void {
+    this.allowlist.clear();
+  }
 }
 
 /**

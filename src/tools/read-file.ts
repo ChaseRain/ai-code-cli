@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import type { Tool, ToolContext, ToolResult } from '../core/types.js';
 import { resolveInRoot, PathEscapeError } from './path-guard.js';
 import { MAX_TOOL_FILE_BYTES, humanBytes } from './limits.js';
+import { validateArgs } from './validate-args.js';
 
 interface ReadFileArgs {
   /** 相对项目根的文件路径 */
@@ -35,8 +36,14 @@ export const readFile: Tool = {
     required: ['path'],
   },
   async execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
-    const { path: file, offset, limit } = (args ?? {}) as ReadFileArgs;
-    if (!file) return { ok: false, error: 'read_file 缺少参数：path' };
+    // T2：统一形参校验（path 必填字符串；offset/limit 可选数字）。
+    const bad = validateArgs('read_file', args, [
+      { name: 'path', type: 'string' },
+      { name: 'offset', type: 'number', required: false },
+      { name: 'limit', type: 'number', required: false },
+    ]);
+    if (bad) return bad;
+    const { path: file, offset, limit } = (args ?? {}) as ReadFileArgs & { path: string };
     try {
       const abs = resolveInRoot(ctx.rootDir, file);
       // P7-B：先 stat，超上限直接拒绝（不整文件读入内存）。

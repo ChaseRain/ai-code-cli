@@ -18,23 +18,18 @@ import type { Provider } from '../core/types.js';
 import {
   DEFAULT_MEMORY_KEEP_RECENT,
   DEFAULT_MEMORY_THRESHOLD_MSGS,
-  Session,
+  FallbackSummarizer,
+  LLMSummarizer,
   createHeuristicSummarizer,
-  listSessions,
-  resolveSessionLog,
 } from '../session/index.js';
+import type { Session, SessionSummary } from '../session/index.js';
 import { CheckpointStore } from '../checkpoint/index.js';
-import { PlanStore, formatPlanSnapshot } from '../plan/index.js';
-import {
-  findLatestAutoCheckpoint,
-  formatDiffResult,
-  formatWorkspaceStatus,
-  getWorkspaceDiff,
-  getWorkspaceStatus,
-} from '../workspace/index.js';
+import { PlanStore } from '../plan/index.js';
 import type { ViewMessage } from './messages.js';
 import { summarizeArgs } from './messages.js';
-import { parseInput, HELP_TEXT } from './command.js';
+import { parseInput } from './command.js';
+import { createCommandExecutor } from './command-executor.js';
+import type { OutMessage } from './command-executor.js';
 
 // ============================================================================
 // 组件入参 —— 由 cli.tsx 装配后注入。Provider 可在运行期随 /model 切换，故用 getter。
@@ -81,6 +76,8 @@ export function App(props: AppProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingPermission | null>(null);
   const [pendingRestore, setPendingRestore] = useState<string | null>(null);
+  // /sessions 交互选择器：null=未打开；否则保存候选列表与高亮下标。
+  const [picker, setPicker] = useState<{ items: SessionSummary[]; index: number } | null>(null);
 
   const checkpointStore = useMemo(
     () => props.checkpointStore ?? new CheckpointStore(session.rootDir),
@@ -97,11 +94,50 @@ export function App(props: AppProps): React.JSX.Element {
   );
   // 与 update_plan 工具共享同一 PlanStore；未注入时新建（隔离场景/测试）。
   const planStore = useMemo(() => props.planStore ?? new PlanStore(), [props.planStore]);
+  // 据摘要器实例类型推导展示标签（供 /memory 展示生效配置）。
+  const summarizerLabel = useMemo(
+    () => describeSummarizer(memoryCompaction.summarizer),
+    [memoryCompaction.summarizer],
+  );
 
   // 运行期可变引用：避免闭包捕获过期值。
   const abortRef = useRef<AbortController | null>(null);
   const pendingRef = useRef<PendingPermission | null>(null);
   pendingRef.current = pending;
+  // 供命令执行器读取最新的运行时状态（model/turn 会随交互变化）。
+  const statusRef = useRef({ model, turn });
+  statusRef.current = { model, turn };
+
+  // 命令执行器（Phase-10 Q1）：把命令副作用（IO + 状态查询）从本组件下沉到纯逻辑模块。
+  //   App 只负责调用它 + 据返回的 messages/effect 渲染。status 用 getter 读最新值。
+  const executor = useMemo(
+    () =>
+      createCommandExecutor({
+        session,
+        checkpointStore,
+        planStore,
+        status: () => ({
+          model: statusRef.current.model,
+          baseURL,
+          maxTurns,
+          turn: statusRef.current.turn,
+          apiKeyConfigured,
+        }),
+        memory: props.memoryCompaction ? memoryCompaction : undefined,
+        summarizerLabel,
+      }),
+    [
+      session,
+      checkpointStore,
+      planStore,
+      baseURL,
+      maxTurns,
+      apiKeyConfigured,
+      props.memoryCompaction,
+      memoryCompaction,
+      summarizerLabel,
+    ],
+  );
 
   // ── 消息流操作（函数式更新，保证基于最新状态）─────────────────────────
   const push = useCallback((m: ViewMessage) => {
@@ -190,216 +226,37 @@ export function App(props: AppProps): React.JSX.Element {
     [appendAssistantDelta, finalizeAssistant, push, maxTurns],
   );
 
-  // ── 提交：内置命令 or 任务 ───────────────────────────────────────────────
-  const submit = useCallback(
-    async (raw: string) => {
-      setInput('');
-      const trimmed = raw.trim();
-      if (!trimmed) return;
-
-      const parsed = parseInput(trimmed);
-
-      // 本地命令：不入 Agent。
-      switch (parsed.kind) {
-        case 'help':
-          push({ kind: 'user', text: trimmed });
-          push({ kind: 'system', text: HELP_TEXT });
-          return;
-        case 'clear':
-          session.clear();
-          setMessages([{ kind: 'system', text: '已清空上下文，开启新会话日志。' }]);
-          setTurn(0);
-          return;
-        case 'status':
-          push({ kind: 'user', text: trimmed });
-          push({ kind: 'system', text: statusText({ model, baseURL, maxTurns, turn, apiKeyConfigured, logFile: session.logFile }) });
-          return;
-        case 'model': {
-          push({ kind: 'user', text: trimmed });
-          if (!parsed.id) {
-            push({ kind: 'system', text: `当前模型：${model}` });
-          } else {
-            setModel(parsed.id);
-            push({ kind: 'system', text: `已切换模型：${parsed.id}` });
-          }
-          return;
+  // ── 从指定日志恢复会话（/resume 与 /sessions 选择器共用）────────────────
+  const resumeFromTarget = useCallback(
+    (target: string) => {
+      try {
+        const { restored } = session.resumeFrom(target);
+        const restoredMsgs = session.messages();
+        const sysCount = restoredMsgs.filter((m) => m.role === 'system').length;
+        const view = messagesToView(restoredMsgs); // 已跳过 system，不刷屏
+        const note =
+          `已从 ${target} 恢复 ${restored} 条消息` +
+          (sysCount ? `（含 system 指令 ${sysCount} 条，不展示）。` : '。');
+        const next: ViewMessage[] = [{ kind: 'system', text: note }, ...view];
+        // Phase-9 M4：恢复的历史含摘要时给出桥接提示，帮模型在摘要语境下顺畅续作。
+        if (session.memoryStats().hasSummary) {
+          next.push({ kind: 'system', text: RESUME_SUMMARY_BRIDGE });
         }
-        case 'resume': {
-          push({ kind: 'user', text: trimmed });
-          const target =
-            parsed.file
-              ? resolveSessionLog(session.rootDir, parsed.file, session.logFile)
-              : Session.findLatestLog(session.rootDir, session.logFile);
-          if (!target) {
-            push({ kind: 'system', text: '没有可恢复的历史会话日志。' });
-            return;
-          }
-          try {
-            const { restored } = session.resumeFrom(target);
-            const restoredMsgs = session.messages();
-            const sysCount = restoredMsgs.filter((m) => m.role === 'system').length;
-            const view = messagesToView(restoredMsgs); // 已跳过 system，不刷屏
-            const note =
-              `已从 ${target} 恢复 ${restored} 条消息` +
-              (sysCount ? `（含 system 指令 ${sysCount} 条，不展示）。` : '。');
-            setMessages([{ kind: 'system', text: note }, ...view]);
-          } catch (err) {
-            push({ kind: 'error', text: `恢复失败：${(err as Error)?.message ?? String(err)}` });
-          }
-          return;
-        }
-        case 'sessions': {
-          push({ kind: 'user', text: trimmed });
-          // Phase-6 LH3：默认只展示最近 50 条，避免大量日志全量读取阻塞 TUI。
-          const SESSIONS_LIMIT = 50;
-          const summaries = listSessions(session.rootDir, session.logFile, { limit: SESSIONS_LIMIT });
-          if (summaries.length === 0) {
-            push({ kind: 'system', text: '暂无历史会话。' });
-            return;
-          }
-          push({
-            kind: 'system',
-            text: summaries
-              .map((s) =>
-                `${s.current ? '*' : ' '} ${s.id} · ${s.title} · ${s.messages} msg · ${s.toolCalls} tools · ${s.updatedAt}`,
-              )
-              .join('\n'),
-          });
-          return;
-        }
-        case 'memory': {
-          push({ kind: 'user', text: trimmed });
-          const st = session.memoryStats();
-          push({
-            kind: 'system',
-            text: [
-              `记忆状态：`,
-              `  消息数：${st.messages}（system ${st.system}）`,
-              `  含历史摘要：${st.hasSummary ? '是' : '否'}`,
-              `  当前会话日志：${st.logFile}`,
-            ].join('\n'),
-          });
-          return;
-        }
-        case 'checkpoint': {
-          push({ kind: 'user', text: trimmed });
-          try {
-            const cp = await checkpointStore.create({
-              label: parsed.label,
-              trigger: 'manual',
-              sessionLog: session.logFile,
-            });
-            session.logCheckpoint({
-              id: cp.id,
-              trigger: cp.trigger,
-              label: cp.label,
-              files: cp.files.length,
-            });
-            push({
-              kind: 'system',
-              text: `已创建 checkpoint ${cp.id}（${cp.files.length} 个文件，排除 ${cp.excluded.length} 项）。`,
-            });
-          } catch (err) {
-            push({ kind: 'error', text: `checkpoint 创建失败：${(err as Error).message}` });
-          }
-          return;
-        }
-        case 'checkpoints': {
-          push({ kind: 'user', text: trimmed });
-          try {
-            // LH6：默认只展示最近 50 条，避免全量解析所有 manifest。
-            const CHECKPOINTS_LIMIT = 50;
-            const cps = await checkpointStore.list({ limit: CHECKPOINTS_LIMIT });
-            if (cps.length === 0) {
-              push({ kind: 'system', text: '暂无 checkpoint。' });
-              return;
-            }
-            const total = await checkpointStore.count();
-            const lines = cps.map(
-              (c) => `${c.id} · ${c.trigger} · ${c.label ?? '-'} · ${c.files.length} files · ${c.createdAt}`,
-            );
-            if (total > cps.length) {
-              lines.push(`（共 ${total} 个，仅展示最近 ${cps.length} 个）`);
-            }
-            push({ kind: 'system', text: lines.join('\n') });
-          } catch (err) {
-            push({ kind: 'error', text: `checkpoint 列表读取失败：${(err as Error).message}` });
-          }
-          return;
-        }
-        case 'restore': {
-          push({ kind: 'user', text: trimmed });
-          if (!parsed.id) {
-            push({ kind: 'error', text: 'restore 缺少 checkpoint id。' });
-            return;
-          }
-          setPendingRestore(parsed.id);
-          push({ kind: 'system', text: `确认恢复 checkpoint ${parsed.id}？按 y 确认，n/Esc 取消。` });
-          return;
-        }
-        case 'changes': {
-          push({ kind: 'user', text: trimmed });
-          try {
-            const status = await getWorkspaceStatus(session.rootDir, checkpointStore);
-            push({ kind: 'system', text: formatWorkspaceStatus(status) });
-          } catch (err) {
-            push({ kind: 'error', text: `工作区状态读取失败：${(err as Error).message}` });
-          }
-          return;
-        }
-        case 'diff': {
-          push({ kind: 'user', text: trimmed });
-          try {
-            const diff = await getWorkspaceDiff(session.rootDir, parsed.path);
-            push({ kind: 'system', text: formatDiffResult(diff) });
-          } catch (err) {
-            push({ kind: 'error', text: `diff 读取失败：${(err as Error).message}` });
-          }
-          return;
-        }
-        case 'undo-last': {
-          push({ kind: 'user', text: trimmed });
-          try {
-            const checkpoint = await findLatestAutoCheckpoint(checkpointStore);
-            if (!checkpoint) {
-              push({ kind: 'system', text: '暂无可恢复的自动 checkpoint。' });
-              return;
-            }
-            setPendingRestore(checkpoint.id);
-            push({
-              kind: 'system',
-              text: `确认恢复最近自动 checkpoint ${checkpoint.id}？按 y 确认，n/Esc 取消。`,
-            });
-          } catch (err) {
-            push({ kind: 'error', text: `自动 checkpoint 查询失败：${(err as Error).message}` });
-          }
-          return;
-        }
-        case 'plan': {
-          push({ kind: 'user', text: trimmed });
-          if (parsed.sub === 'clear') {
-            planStore.clear();
-            push({ kind: 'system', text: '已清空当前任务计划。' });
-          } else {
-            push({ kind: 'system', text: formatPlanSnapshot(planStore.current()) });
-          }
-          return;
-        }
-        case 'exit':
-          exit();
-          return;
-        case 'unknown':
-          push({ kind: 'user', text: trimmed });
-          push({ kind: 'system', text: `未知命令 /${parsed.name}，输入 /help 查看可用命令。` });
-          return;
-        case 'task':
-          break; // 落到下面交给 Agent。
+        setMessages(next);
+      } catch (err) {
+        push({ kind: 'error', text: `恢复失败：${(err as Error)?.message ?? String(err)}` });
       }
+    },
+    [push, session],
+  );
 
+  // ── 真正发起一次 Agent 任务（被 run-task 副作用触发）─────────────────────
+  const runTask = useCallback(
+    async (text: string) => {
       // 任务：需要 Provider（即 Key 已配置）。
       const provider = makeProvider(model);
       if (!provider) {
-        push({ kind: 'user', text: trimmed });
+        push({ kind: 'user', text });
         push({
           kind: 'error',
           text: '未配置 API Key（ANTHROPIC_AUTH_TOKEN），无法发起任务。可用本地命令：/help /status /model /clear /exit。',
@@ -407,18 +264,80 @@ export function App(props: AppProps): React.JSX.Element {
         return;
       }
 
-      push({ kind: 'user', text: parsed.text });
+      push({ kind: 'user', text });
       setBusy(true);
       const ac = new AbortController();
       abortRef.current = ac;
 
       await runAgent(
-        parsed.text,
+        text,
         { provider, tools, permission, session, checkpoint: checkpointStore, memory: memoryCompaction },
         { model, maxTurns, signal: ac.signal, onEvent },
       );
     },
-    [apiKeyConfigured, baseURL, checkpointStore, exit, makeProvider, maxTurns, memoryCompaction, model, onEvent, permission, planStore, push, session, tools, turn],
+    [checkpointStore, makeProvider, maxTurns, memoryCompaction, model, onEvent, permission, push, session, tools],
+  );
+
+  /** 把执行器返回的 system/error 消息落到消息流。 */
+  const pushOutMessages = useCallback(
+    (msgs: OutMessage[]) => {
+      for (const m of msgs) push({ kind: m.kind, text: m.text });
+    },
+    [push],
+  );
+
+  // ── 提交：解析 → 执行器 → 据结构化结果 push 消息 / 触发副作用 ──────────────
+  // 本组件不再内嵌命令的 IO 与状态查询（Phase-10 Q1）：执行器算出「该做什么 + 查好数据」，
+  //   App 只负责回显输入、落消息、并执行运行时才能做的副作用（弹窗 / picker / 切模型 / 清屏 /
+  //   退出 / 恢复 / 落到 Agent）。
+  const submit = useCallback(
+    async (raw: string) => {
+      setInput('');
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+
+      const parsed = parseInput(trimmed);
+      const outcome = await executor.run(parsed, trimmed);
+
+      // ① 回显原始输入（命令的回显由执行器决定；run-task/clear/exit 不在此回显）。
+      if (outcome.echoUser) push({ kind: 'user', text: trimmed });
+      // ② 顺序落系统/错误消息。
+      pushOutMessages(outcome.messages);
+
+      // ③ 执行副作用（运行时能力，执行器只发意图）。
+      const eff = outcome.effect;
+      switch (eff.type) {
+        case 'none':
+          return;
+        case 'clear-session':
+          session.clear();
+          // Phase-9 P3：/clear 开启新会话，必须重置会话级 allowlist——
+          //   否则上一会话「本会话始终允许」的工具会在新会话继续直过。
+          permission.reset();
+          setMessages([{ kind: 'system', text: '已清空上下文，开启新会话日志。' }]);
+          setTurn(0);
+          return;
+        case 'set-model':
+          setModel(eff.id);
+          return;
+        case 'open-session-picker':
+          setPicker({ items: eff.items, index: eff.index });
+          return;
+        case 'resume':
+          resumeFromTarget(eff.target);
+          return;
+        case 'confirm-restore':
+          setPendingRestore(eff.id);
+          return;
+        case 'exit':
+          exit();
+          return;
+        case 'run-task':
+          await runTask(eff.text);
+          return;
+      }
+    },
+    [executor, exit, permission, push, pushOutMessages, resumeFromTarget, runTask, session],
   );
 
   const confirmRestore = useCallback(
@@ -464,6 +383,25 @@ export function App(props: AppProps): React.JSX.Element {
       else if (c === 'n' || key.escape) decide(p, 'deny');
       return;
     }
+
+    // /sessions 选择器：↑/↓（或 Ctrl-P/N）移动、Enter 恢复、Esc 取消。
+    if (picker) {
+      const n = picker.items.length;
+      if (key.upArrow || (key.ctrl && inputChar === 'p')) {
+        setPicker((s) => (s ? { ...s, index: (s.index - 1 + n) % n } : s));
+      } else if (key.downArrow || (key.ctrl && inputChar === 'n')) {
+        setPicker((s) => (s ? { ...s, index: (s.index + 1) % n } : s));
+      } else if (key.return) {
+        const sel = picker.items[picker.index];
+        setPicker(null);
+        if (sel) resumeFromTarget(sel.logPath);
+      } else if (key.escape) {
+        setPicker(null);
+        push({ kind: 'system', text: '已取消会话选择。' });
+      }
+      return;
+    }
+
     // 非弹窗：Esc 中断在途任务。
     if (key.escape && busy && abortRef.current) {
       abortRef.current.abort();
@@ -495,6 +433,8 @@ export function App(props: AppProps): React.JSX.Element {
         <RestorePrompt id={pendingRestore} />
       ) : pending ? (
         <PermissionPrompt tool={pending.tool.name} args={pending.args} />
+      ) : picker ? (
+        <SessionPicker items={picker.items} index={picker.index} />
       ) : (
         <Box>
           <Text color="cyan">{busy ? '… ' : '› '}</Text>
@@ -503,7 +443,7 @@ export function App(props: AppProps): React.JSX.Element {
             onChange={setInput}
             onSubmit={submit}
             placeholder={busy ? '运行中（Esc 中断）…' : '输入任务或 / 命令（/help）'}
-            focus={!pending}
+            focus={!pending && !picker}
           />
         </Box>
       )}
@@ -625,6 +565,46 @@ export function RestorePrompt({ id }: { id: string }): React.JSX.Element {
   );
 }
 
+/** /sessions 交互选择器：高亮当前项，支持窗口滚动（最多展示 VISIBLE 行）。 */
+export function SessionPicker({
+  items,
+  index,
+}: {
+  items: SessionSummary[];
+  index: number;
+}): React.JSX.Element {
+  const VISIBLE = 10;
+  // 让高亮项尽量居中，并夹紧到列表边界。
+  let start = Math.max(0, index - Math.floor(VISIBLE / 2));
+  start = Math.min(start, Math.max(0, items.length - VISIBLE));
+  const window = items.slice(start, start + VISIBLE);
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+      <Text color="cyan" bold>
+        选择会话恢复（↑/↓ 移动 · Enter 恢复 · Esc 取消）{'  '}
+        <Text color="gray">
+          {index + 1}/{items.length}
+        </Text>
+      </Text>
+      {start > 0 && <Text color="gray">  ↑ 上面还有 {start} 条</Text>}
+      {window.map((s, i) => {
+        const real = start + i;
+        const selected = real === index;
+        return (
+          <Text key={s.id} color={selected ? 'cyan' : undefined} inverse={selected}>
+            {selected ? '❯ ' : '  '}
+            {s.current ? '*' : ' '} {s.title} · {s.messages} msg · {s.toolCalls} tools · {s.updatedAt}
+          </Text>
+        );
+      })}
+      {start + VISIBLE < items.length && (
+        <Text color="gray">  ↓ 下面还有 {items.length - start - VISIBLE} 条</Text>
+      )}
+    </Box>
+  );
+}
+
 export function StatusBar({
   model,
   phase,
@@ -698,23 +678,6 @@ function welcomeText(model: string): string {
   ].join('\n');
 }
 
-function statusText(s: {
-  model: string;
-  baseURL: string;
-  maxTurns: number;
-  turn: number;
-  apiKeyConfigured: boolean;
-  logFile: string;
-}): string {
-  return [
-    `模型：${s.model}`,
-    `baseURL：${s.baseURL}`,
-    `轮次：${s.turn}/${s.maxTurns}`,
-    `API Key：${s.apiKeyConfigured ? '已配置' : '未配置'}`,
-    `会话日志：${s.logFile}`,
-  ].join('\n');
-}
-
 function phaseLabel(p: AgentPhase): string {
   switch (p) {
     case 'idle':
@@ -744,3 +707,18 @@ function phaseColor(p: AgentPhase): string {
 function effectLabel(e: 'allow' | 'deny' | 'always'): string {
   return e === 'deny' ? '拒绝' : e === 'always' ? '本会话始终允许' : '允许';
 }
+
+/** 据摘要器实例类型给出 /memory 展示标签（Phase-9 M3）。 */
+export function describeSummarizer(s: import('../session/index.js').Summarizer): string {
+  if (s instanceof FallbackSummarizer) return 'llm（失败降级 heuristic）';
+  if (s instanceof LLMSummarizer) return 'llm';
+  return 'heuristic';
+}
+
+// `/memory` 展示文本的格式化已下沉到 command-executor（单一真相）；此处 re-export 兼容既有导入。
+export { formatMemoryStatus } from './command-executor.js';
+
+/** `/resume` 含摘要时的桥接提示文案（Phase-9 M4，导出供测试）。 */
+export const RESUME_SUMMARY_BRIDGE =
+  '提示：本次恢复的上下文含历史摘要。建议用 /diff 查看已有文件变更、' +
+  '用一句话清晰描述要续作的目标；若摘要信息不足以续作，可 /clear 重新开始。';

@@ -77,6 +77,27 @@ describe('Permission', () => {
     expect(asker).toHaveBeenCalledTimes(1);
   });
 
+  it('P3：reset() 后此前 always 的工具重新触发 asker（/clear 语义）', async () => {
+    const asker = vi.fn<PermissionAsker>().mockResolvedValue('always');
+    const perm = new Permission(asker);
+    const tool = makeTool('write_file', false);
+
+    // 第一次：always → 放行并落 allowlist。
+    await expect(perm.check(tool, {})).resolves.toBe('allow');
+    expect(asker).toHaveBeenCalledTimes(1);
+    // 同名工具直过，不再问。
+    await expect(perm.check(tool, {})).resolves.toBe('allow');
+    expect(asker).toHaveBeenCalledTimes(1);
+
+    // /clear → reset()：清空会话级 allowlist。
+    perm.reset();
+
+    // 不变量：同名工具须重新触发确认。
+    asker.mockResolvedValueOnce('deny');
+    await expect(perm.check(tool, {})).resolves.toBe('deny');
+    expect(asker).toHaveBeenCalledTimes(2);
+  });
+
   it('allowlist 按工具名隔离：未授权的其它工具仍需确认', async () => {
     const asker = vi.fn<PermissionAsker>().mockResolvedValue('always');
     const perm = new Permission(asker);

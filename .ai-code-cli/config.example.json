@@ -1,0 +1,7 @@
+{
+  "model": "deepseek/deepseek-v4-pro",
+  "baseURL": "https://ai-kas.kso.net/codeplan/anthropic",
+  "timeoutMs": 60000,
+  "maxTurns": 25,
+  "maxRetries": 2
+}

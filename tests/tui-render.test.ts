@@ -11,10 +11,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { App, MessageList, PermissionPrompt, RestorePrompt, StatusBar, messagesToView } from '../src/tui/App.js';
+import {
+  App,
+  MessageList,
+  PermissionPrompt,
+  RestorePrompt,
+  StatusBar,
+  messagesToView,
+  formatMemoryStatus,
+  describeSummarizer,
+  RESUME_SUMMARY_BRIDGE,
+} from '../src/tui/App.js';
 import { MockProvider } from '../src/provider/mock.js';
 import { ToolRegistry } from '../src/tools/registry.js';
-import { Session } from '../src/session/index.js';
+import {
+  Session,
+  createHeuristicSummarizer,
+  createSummarizer,
+} from '../src/session/index.js';
+import type { MemoryCompactionOptions } from '../src/agent/index.js';
 import { PlanStore, formatPlanSnapshot } from '../src/plan/index.js';
 import type { ViewMessage } from '../src/tui/messages.js';
 import type { Message } from '../src/core/types.js';
@@ -148,6 +163,55 @@ describe('TUI 渲染冒烟 (R4)', () => {
     expect(frame).toContain('读取');
     expect(frame).toContain('修改');
     expect(frame).toContain('in_progress');
+    unmount();
+  });
+
+  // ── Phase-9 M3/M4：/memory 展示生效配置 + /resume 桥接提示（纯函数，确定性）──
+  it('⑦ formatMemoryStatus：展示生效记忆配置（enabled / 阈值 / summarizer 类型）', () => {
+    const memory: MemoryCompactionOptions = {
+      thresholdMsgs: 33,
+      keepRecent: 7,
+      thresholdTokens: 12345,
+      keepRecentTokens: 6000,
+      summarizer: createSummarizer('llm', new MockProvider({ scripts: [] }), 'm'),
+    };
+    const text = formatMemoryStatus(
+      { messages: 9, system: 2, hasSummary: true, logFile: '/tmp/x.jsonl' },
+      memory,
+      describeSummarizer(memory.summarizer),
+    );
+    expect(text).toContain('记忆配置');
+    expect(text).toContain('自动压缩：开启');
+    expect(text).toContain('33');
+    expect(text).toContain('12345');
+    expect(text).toContain('llm（失败降级 heuristic）');
+    expect(text).toContain('含历史摘要：是');
+  });
+
+  it('⑦b formatMemoryStatus：enabled=false 时展示关闭', () => {
+    const text = formatMemoryStatus(
+      { messages: 3, system: 1, hasSummary: false, logFile: '/tmp/y.jsonl' },
+      undefined,
+      'heuristic',
+    );
+    expect(text).toContain('自动压缩：关闭');
+  });
+
+  it('⑦c describeSummarizer：heuristic 标签', () => {
+    expect(describeSummarizer(createHeuristicSummarizer())).toBe('heuristic');
+  });
+
+  it('⑧ /resume 桥接提示文案含 /diff 与 /clear 引导', () => {
+    expect(RESUME_SUMMARY_BRIDGE).toContain('历史摘要');
+    expect(RESUME_SUMMARY_BRIDGE).toContain('/diff');
+    expect(RESUME_SUMMARY_BRIDGE).toContain('/clear');
+    // 渲染为 system 消息可见。
+    const { lastFrame, unmount } = render(
+      React.createElement(MessageList, {
+        messages: [{ kind: 'system', text: RESUME_SUMMARY_BRIDGE }],
+      }),
+    );
+    expect(lastFrame() ?? '').toContain('/diff');
     unmount();
   });
 

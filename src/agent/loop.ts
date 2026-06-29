@@ -82,6 +82,10 @@ export interface AgentDeps {
 export interface MemoryCompactionOptions {
   thresholdMsgs: number;
   keepRecent: number;
+  /** token 预算触发阈值（Phase-9 M2，可选；提供时与消息数判据叠加）。 */
+  thresholdTokens?: number;
+  /** 近窗保留 token 预算（Phase-9 M2，可选；提供时按 token 而非条数保留近窗）。 */
+  keepRecentTokens?: number;
   summarizer: Summarizer;
 }
 
@@ -412,6 +416,8 @@ async function maybeCompactMemory(
     const result = await session.maybeCompact({
       thresholdMsgs: memory.thresholdMsgs,
       keepRecent: memory.keepRecent,
+      thresholdTokens: memory.thresholdTokens,
+      keepRecentTokens: memory.keepRecentTokens,
       summarizer: memory.summarizer,
       signal,
     });

@@ -14,7 +14,8 @@ import { loadConfig } from './config/index.js';
 import { AnthropicProvider } from './provider/index.js';
 import type { Provider } from './core/types.js';
 import { createDefaultRegistry } from './tools/index.js';
-import { Session } from './session/index.js';
+import { Session, createSummarizer } from './session/index.js';
+import type { MemoryCompactionOptions } from './agent/index.js';
 import { CheckpointStore } from './checkpoint/index.js';
 import { PlanStore } from './plan/index.js';
 import { App } from './tui/index.js';
@@ -61,6 +62,25 @@ function main(): void {
     // 说明：AnthropicProvider 从 ChatRequest.model 取模型；model 由 Loop 经 RunOpts 注入，
     // 故工厂无需把 model 传进构造器，切换 model 只需让 App 用新值发起 runAgent。
   };
+
+  // ── 记忆 / 上下文压缩选项（Phase-9 M3）───────────────────────────────────
+  // 据 config.memory 选摘要器（heuristic / llm / auto），并按阈值装配压缩选项。
+  // llm/auto 复用主 Provider（同密钥/网关）；未配置 Key 时 createSummarizer 自动回落 heuristic。
+  const summarizer = createSummarizer(
+    config.memory.summarizer,
+    apiKey ? makeProvider(config.model) : null,
+    config.model,
+    { timeoutMs: config.timeoutMs },
+  );
+  const memoryCompaction: MemoryCompactionOptions | undefined = config.memory.enabled
+    ? {
+        thresholdMsgs: config.memory.thresholdMsgs,
+        keepRecent: config.memory.keepRecent,
+        thresholdTokens: config.memory.thresholdTokens,
+        keepRecentTokens: config.memory.keepRecentTokens,
+        summarizer,
+      }
+    : undefined;
 
   if (!apiKeyConfigured) {
     process.stderr.write(
